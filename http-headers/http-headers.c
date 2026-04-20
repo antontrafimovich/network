@@ -63,7 +63,6 @@ int main(int argc, char **argv)
         return 1;
     }
 
-
     if (listen(tcp_socket, 1000) != 0)
     {
         perror("listen failed");
@@ -101,94 +100,94 @@ int main(int argc, char **argv)
                 continue;
             }
 
-            if (recv_result == 0)
+            if (request_is_complete(buf))
             {
-                if (request_is_complete(buf))
+                // run through all the headers in request up until \r\n\r\n sequence
+                // split each header string into (key, value) tuple by :
+                // add "key": "value" string to the common json
+                // take the length of the final string
+                // create initial headers response and attach json to it;
+
+                char result[4096] = "{";
+                size_t result_cursor = 1;
+
+                char *start = buf;
+                size_t i = 0;
+                while (start && *start)
                 {
-                    // run through all the headers in request up until \r\n\r\n sequence
-                    // split each header string into (key, value) tuple by :
-                    // add "key": "value" string to the common json
-                    // take the length of the final string
-                    // create initial headers response and attach json to it;
+                    char *end = strstr(start, "\r\n");
 
-                    char result[4096] = "{";
-                    size_t result_cursor = 1;
-
-                    char *start = buf;
-                    size_t i = 0;
-                    while (start && *start)
+                    if (!end)
                     {
-                        char *end = strstr(start, "\r\n");
+                        result[result_cursor] = '}';
+                        break;
+                    }
 
-                        if (!end)
-                        {
-                            result[result_cursor] = '}';
-                            break;
-                        }
-
-                        if (i == 0)
-                        {
-                            start = end + 2;
-                            i++;
-                            continue;
-                        }
-                        else
-                        {
-                            char *header_start = start;
-                            char *header_end = end;
-                            char *header_key_end = strchr(start, ':');
-
-                            if (!header_key_end)
-                            {
-                                printf("For header %s there's no header key\n", start);
-                                start = end + 2;
-                                continue;
-                            }
-
-                            result[result_cursor++] = '\"';
-
-                            int i;
-                            for (i = 0; i < (header_key_end - header_start); i++)
-                            {
-                                result[result_cursor++] = header_start[i];
-                            }
-
-                            result[result_cursor++] = '\"';
-                            result[result_cursor++] = ':';
-
-                            result[result_cursor++] = '\"';
-
-                            for (i = 0; i < (header_end - (header_key_end + 2)); i++)
-                            {
-                                result[result_cursor++] = header_key_end[i + 2];
-                            }
-
-                            result[result_cursor++] = '\"';
-                            result[result_cursor++] = ',';
-                        }
-
+                    if (i == 0)
+                    {
                         start = end + 2;
                         i++;
+                        continue;
                     }
-                    result[--result_cursor] = '}';
-
-                    char sendbuf[4096];
-                    snprintf(sendbuf, 106 + result_cursor + 1, "HTTP/1.1 200 OK\r\nContent-Length:%ld\r\nContent-Type: application/json\r\nCache-Control: no-store\r\n\r\n%s", result_cursor + 1, result);
-
-                    printf("Result is %s\n", sendbuf);
-
-                    if (send(conn_fd, sendbuf, 106 + result_cursor + 1, 0) == -1)
+                    else
                     {
-                        perror("send failed");
-                        close(conn_fd);
-                        break;
-                    };
-                }
+                        char *header_start = start;
+                        char *header_end = end;
+                        char *header_key_end = strchr(start, ':');
 
-                if (close(conn_fd) == -1) {
+                        if (!header_key_end)
+                        {
+                            printf("For header %s there's no header key\n", start);
+                            start = end + 2;
+                            continue;
+                        }
+
+                        result[result_cursor++] = '\"';
+
+                        int i;
+                        for (i = 0; i < (header_key_end - header_start); i++)
+                        {
+                            result[result_cursor++] = header_start[i];
+                        }
+
+                        result[result_cursor++] = '\"';
+                        result[result_cursor++] = ':';
+
+                        result[result_cursor++] = '\"';
+
+                        for (i = 0; i < (header_end - (header_key_end + 2)); i++)
+                        {
+                            result[result_cursor++] = header_key_end[i + 2];
+                        }
+
+                        result[result_cursor++] = '\"';
+                        result[result_cursor++] = ',';
+                    }
+
+                    start = end + 2;
+                    i++;
+                }
+                result[--result_cursor] = '}';
+
+                char sendbuf[4096];
+                snprintf(sendbuf, 106 + result_cursor + 1, "HTTP/1.1 200 OK\r\nContent-Length:%ld\r\nContent-Type: application/json\r\nCache-Control: no-store\r\n\r\n%s", result_cursor + 1, result);
+
+                printf("Result is %s\n", sendbuf);
+
+                if (send(conn_fd, sendbuf, 106 + result_cursor + 1, 0) == -1)
+                {
+                    perror("send failed");
+                    close(conn_fd);
+                    break;
+                };
+            }
+
+            if (recv_result == 0)
+            {
+                if (close(conn_fd) == -1)
+                {
                     perror("close failed");
                 };
-
                 break;
             }
 
