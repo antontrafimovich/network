@@ -88,8 +88,6 @@ int main(int argc, char **argv)
         char buf[8192] = {0};
         size_t used = 0;
 
-        printf("Sizeof buf is: %ld\n", sizeof(buf));
-
         while (1)
         {
             int recv_result = recv(conn_fd, buf + used, sizeof(buf) - used, 0);
@@ -97,6 +95,10 @@ int main(int argc, char **argv)
             if (recv_result == -1)
             {
                 perror("recv failed");
+                break;
+            }
+
+            if (recv_result == 0) {
                 continue;
             }
 
@@ -133,7 +135,7 @@ int main(int argc, char **argv)
                     {
                         char *header_start = start;
                         char *header_end = end;
-                        char *header_key_end = strchr(start, ':');
+                        char *header_key_end = memchr(start, ':', header_end - header_start);
 
                         if (!header_key_end)
                         {
@@ -155,9 +157,13 @@ int main(int argc, char **argv)
 
                         result[result_cursor++] = '\"';
 
-                        for (i = 0; i < (header_end - (header_key_end + 2)); i++)
+                        for (i = 0; i < (header_end - (header_key_end + 1)); i++)
                         {
-                            result[result_cursor++] = header_key_end[i + 2];
+                            if (header_key_end[i + 1] == ' ' && i == 0) {
+                                continue;
+                            }
+
+                            result[result_cursor++] = header_key_end[i + 1];
                         }
 
                         result[result_cursor++] = '\"';
@@ -174,12 +180,29 @@ int main(int argc, char **argv)
 
                 printf("Result is %s\n", sendbuf);
 
-                if (send(conn_fd, sendbuf, 106 + result_cursor + 1, 0) == -1)
+                size_t total_sent = 0;
+                size_t to_send_size = 106 + result_cursor + 1;
+
+                while (1)
                 {
-                    perror("send failed");
-                    close(conn_fd);
-                    break;
-                };
+                    ssize_t sent = send(conn_fd, sendbuf + total_sent, to_send_size - total_sent, 0);
+
+                    if (sent == -1)
+                    {
+                        perror("send failed");
+                        break;
+                    }
+
+                    if (sent == 0) {
+                        break;
+                    }
+
+                    total_sent += sent;
+
+                    if (total_sent == to_send_size) {
+                        break;
+                    }
+                }
             }
 
             if (recv_result == 0)
