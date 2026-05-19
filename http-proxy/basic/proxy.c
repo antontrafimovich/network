@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 
 int request_is_complete(char *buf)
 {
@@ -68,6 +69,7 @@ int tcp_on_connect(int sfd, void (*f)(int))
         }
 
         f(cfd);
+        close(cfd);
     }
 }
 
@@ -80,6 +82,7 @@ int tcp_connect(const char *host, in_port_t port)
     if (inet_pton(AF_INET, host, &in_addr) < 1)
     {
         perror("inet_pton failed");
+        printf("Error: %s\n", strerror(errno));
         return 1;
     }
 
@@ -103,14 +106,21 @@ void on_connect(int cfd)
     int destfd = tcp_connect("127.0.0.1", 8081);
 
     uint8_t buf[1024] = {0};
-    ssize_t used = 0;
+    size_t used = 0;
     while (1)
     {
-        ssize_t recvr = recv(cfd, buf + used, sizeof(buf) - used, 0);
+        ssize_t recvr = recv(cfd, buf, sizeof(buf) - used, 0);
 
         if (recvr == -1)
         {
+            perror("recv failed");
+            printf("Error: %s\n", strerror(errno));
             continue;
+        }
+
+        if (recvr > 0)
+        {
+            send(destfd, buf + used, recvr, 0);
         }
 
         if (recvr == 0 || request_is_complete(buf))
@@ -118,23 +128,20 @@ void on_connect(int cfd)
             uint8_t proxy_buf[4096] = {0};
             size_t proxy_used = 0;
 
-            send(destfd, buf + used, recvr, 0);
-
             while (1)
             {
                 int proxy_recv_result = recv(destfd, proxy_buf + proxy_used, sizeof(proxy_buf) - proxy_used, 0);
                 if (proxy_recv_result == 0)
                 {
-                    close(cfd);
                     break;
                 }
-                int send_result = send(cfd, proxy_buf + proxy_used, proxy_recv_result, 0);
+
+                ssize_t sendr = send(cfd, proxy_buf + proxy_used, proxy_recv_result, 0);
                 proxy_used += proxy_recv_result;
             }
+
             break;
         }
-
-        send(destfd, buf + used, recvr, 0);
 
         used += recvr;
     }
