@@ -4,6 +4,7 @@
 #include <netinet/ip.h>
 #include <arpa/inet.h>
 #include <string.h>
+#include <unistd.h>
 
 int request_is_complete(char *buf)
 {
@@ -49,13 +50,13 @@ int tcp_listen(const char *host, in_port_t port)
         return 1;
     }
 
+    printf("Server is listening on port %d\n", port);
+
     return sfd;
 }
 
-int main(int argc, char *argv[])
+int tcp_on_connect(int sfd, void (*f)(int))
 {
-    int sfd = tcp_listen("0.0.0.0", 8082);
-
     while (1)
     {
         struct sockaddr_in addrc = {0};
@@ -66,65 +67,82 @@ int main(int argc, char *argv[])
             continue;
         }
 
-        int scon = socket(AF_INET, SOCK_STREAM, 0);
-
-        struct in_addr in_addr;
-
-        if (inet_pton(AF_INET, "127.0.0.1", &in_addr) < 1)
-        {
-            perror("inet_pton failed");
-            return 1;
-        }
-
-        struct sockaddr_in addr =
-            {
-                AF_INET,
-                htons(8081),
-                in_addr};
-
-        if (connect(scon, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-            perror("connect failed");
-            return 1;
-        };
-
-        uint8_t buf[1024] = {0};
-        ssize_t used = 0;
-        while (1)
-        {
-            ssize_t recvr = recv(cfd, buf + used, 1024 - used, 0);
-
-            if (recvr == -1)
-            {
-                continue;
-            }
-
-            if (recvr == 0 || request_is_complete(buf))
-            {
-                uint8_t proxy_buf[4096] = {0};
-                size_t proxy_used = 0;
-
-                send(scon, buf + used, recvr, 0);
-
-                while (1)
-                {
-                    int proxy_recv_result = recv(scon, proxy_buf + proxy_used, sizeof(proxy_buf) - proxy_used, 0);
-                    if (proxy_recv_result == 0) {
-                        break;
-                    }
-                    send(cfd, proxy_buf + proxy_used, proxy_recv_result, 0);
-                    proxy_used += proxy_recv_result;
-                }
-                break;
-            }
-
-            printf("%s\n", (char *)buf);
-
-            send(scon, buf + used, recvr, 0);
-
-            used += recvr;
-
-        }
-
-        printf("Data has been received\n");
+        f(cfd);
     }
+}
+
+int tcp_connect(const char *host, in_port_t port)
+{
+    int scon = socket(AF_INET, SOCK_STREAM, 0);
+
+    struct in_addr in_addr;
+
+    if (inet_pton(AF_INET, host, &in_addr) < 1)
+    {
+        perror("inet_pton failed");
+        return 1;
+    }
+
+    struct sockaddr_in addr =
+        {
+            AF_INET,
+            htons(port),
+            in_addr};
+
+    if (connect(scon, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+    {
+        perror("connect failed");
+        return 1;
+    };
+
+    return scon;
+}
+
+void on_connect(int cfd)
+{
+    int destfd = tcp_connect("127.0.0.1", 8081);
+
+    uint8_t buf[1024] = {0};
+    ssize_t used = 0;
+    while (1)
+    {
+        ssize_t recvr = recv(cfd, buf + used, sizeof(buf) - used, 0);
+
+        if (recvr == -1)
+        {
+            continue;
+        }
+
+        if (recvr == 0 || request_is_complete(buf))
+        {
+            uint8_t proxy_buf[4096] = {0};
+            size_t proxy_used = 0;
+
+            send(destfd, buf + used, recvr, 0);
+
+            while (1)
+            {
+                int proxy_recv_result = recv(destfd, proxy_buf + proxy_used, sizeof(proxy_buf) - proxy_used, 0);
+                if (proxy_recv_result == 0)
+                {
+                    close(cfd);
+                    break;
+                }
+                int send_result = send(cfd, proxy_buf + proxy_used, proxy_recv_result, 0);
+                proxy_used += proxy_recv_result;
+            }
+            break;
+        }
+
+        send(destfd, buf + used, recvr, 0);
+
+        used += recvr;
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    int sfd = tcp_listen("0.0.0.0", 8082);
+
+    tcp_on_connect(sfd, &on_connect);
 }
