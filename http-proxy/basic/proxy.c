@@ -86,7 +86,7 @@ int tcp_connect(const char *host, in_port_t port)
     {
         perror("inet_pton failed");
         printf("Error: %s\n", strerror(errno));
-        return 1;
+        return -1;
     }
 
     struct sockaddr_in addr =
@@ -98,7 +98,7 @@ int tcp_connect(const char *host, in_port_t port)
     if (connect(scon, (struct sockaddr *)&addr, sizeof(addr)) != 0)
     {
         perror("connect failed");
-        return 1;
+        return -1;
     };
 
     return scon;
@@ -106,7 +106,13 @@ int tcp_connect(const char *host, in_port_t port)
 
 void on_connect(int client_socket)
 {
-    int upstream_socket = tcp_connect("127.0.0.1", 8081);
+    int upstream_socket;
+    if ((upstream_socket = tcp_connect("127.0.0.1", 8081)) < 0)
+    {
+        fprintf(stderr, "connect to the upstream server failed\n");
+        return;
+    }
+
     struct timespec u_recv_start, u_recv_end, dest_send_start, dest_send_end, dest_recv_start, dest_recv_end, u_send_start, u_send_end;
 
     uint8_t buf[1024] = {0};
