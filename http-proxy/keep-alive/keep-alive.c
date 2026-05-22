@@ -6,11 +6,14 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
-#include <time.h>
 
 int request_is_complete(char *buf)
 {
     return strstr(buf, "\r\n\r\n") != NULL;
+}
+
+int response_is_complete(char *response, size_t response_size) {
+    return response[response_size - 1] == '\n' && response[response_size - 2] == '\r' && response[response_size - 3] == '\n' && response[response_size - 4] == '\r' && response[response_size - 5] == '0';
 }
 
 int tcp_listen(const char *host, in_port_t port)
@@ -72,7 +75,7 @@ int tcp_on_connect(int sfd, void (*f)(int))
         printf("New connection from ('%s', '%d')\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
 
         f(client_socket);
-        close(client_socket);
+        // close(client_socket);
     }
 }
 
@@ -113,19 +116,11 @@ void on_connect(int client_socket)
         return;
     }
 
-    struct timespec u_recv_start, u_recv_end, dest_send_start, dest_send_end, dest_recv_start, dest_recv_end, u_send_start, u_send_end;
-
-    uint8_t buf[1024] = {0};
+    uint8_t buf[8192] = {0};
     size_t used = 0;
     while (1)
     {
-        // clock_gettime(CLOCK_MONOTONIC, &u_recv_start);
-        ssize_t recvr = recv(client_socket, buf, sizeof(buf) - used, 0);
-        // clock_gettime(CLOCK_MONOTONIC, &u_recv_end);
-
-        // double elapsed = (u_recv_end.tv_sec - u_recv_start.tv_sec) +
-        //                  (u_recv_end.tv_nsec - u_recv_start.tv_nsec) / 1e9;
-        // printf("Recv from user in %.6f seconds\n", elapsed);
+        ssize_t recvr = recv(client_socket, buf + used, sizeof(buf) - used, 0);
 
         if (recvr == -1)
         {
@@ -138,52 +133,45 @@ void on_connect(int client_socket)
 
         if (recvr > 0)
         {
-            // clock_gettime(CLOCK_MONOTONIC, &dest_send_start);
             send(upstream_socket, buf + used, recvr, 0);
-            printf("     * ->   %ld B\n", recvr);
-            // clock_gettime(CLOCK_MONOTONIC, &dest_send_end);
-
-            // double elapsed = (dest_send_end.tv_sec - dest_send_start.tv_sec) +
-            //                  (dest_send_end.tv_nsec - dest_send_start.tv_nsec) / 1e9;
-            // printf("Send to destination in %.6f seconds\n", elapsed);
         }
 
         if (recvr == 0 || request_is_complete(buf))
         {
-            uint8_t proxy_buf[4096] = {0};
-            size_t proxy_used = 0;
+            uint8_t upstream_buf[4096] = {0};
 
             while (1)
             {
-                // clock_gettime(CLOCK_MONOTONIC, &dest_recv_start);
-                ssize_t upstream_recv_result = recv(upstream_socket, proxy_buf + proxy_used, sizeof(proxy_buf) - proxy_used, 0);
-                // clock_gettime(CLOCK_MONOTONIC, &dest_recv_end);
+                ssize_t upstream_recv_result = recv(upstream_socket, upstream_buf, sizeof(upstream_buf), 0);
                 printf("     * <-   %ld B\n", upstream_recv_result);
-                // printf("%s\n", proxy_buf);
 
-                // double dest_recv_elapsed = (dest_recv_end.tv_sec - dest_recv_start.tv_sec) +
-                //                            (dest_recv_end.tv_nsec - dest_recv_start.tv_nsec) / 1e9;
-                // printf("Recv from destination in %.6f seconds\n", dest_recv_elapsed);
+                for (size_t i = 0; i < upstream_recv_result; i++) {
+                    printf("/%02x", upstream_buf[i]);
+                }
+                printf("\n");
 
-                if (upstream_recv_result == 0)
+                ssize_t sendr = send(client_socket, upstream_buf, upstream_recv_result, 0);
+                printf("<-   *      %ld B\n", sendr);
+
+
+
+                if (response_is_complete(upstream_buf, upstream_recv_result) || sendr == 0)
                 {
+                    printf("response is complete \n");
                     break;
                 }
 
-                // clock_gettime(CLOCK_MONOTONIC, &u_send_start);
-                ssize_t sendr = send(client_socket, proxy_buf + proxy_used, upstream_recv_result, 0);
-                printf("<-   *      %ld B\n", sendr);
-                // clock_gettime(CLOCK_MONOTONIC, &u_send_end);
-
-                // double elapsed = (u_send_end.tv_sec - u_send_start.tv_sec) +
-                //                  (u_send_end.tv_nsec - u_send_start.tv_nsec) / 1e9;
-                // printf("Recv from destination in %.6f seconds\n", elapsed);
-
-                proxy_used += upstream_recv_result;
-                break;
+                // break;
             }
 
-            break;
+            used = 0;
+
+            if (recvr == 0) {
+                close(client_socket);
+                return;
+            }
+
+            continue;
         }
 
         used += recvr;
