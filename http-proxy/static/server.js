@@ -3,7 +3,7 @@ const morgan = require("morgan");
 const path = require("path");
 
 const app = express();
-const port = 8082;
+const port = 8081;
 
 app.use(morgan("combined"));
 app.use(express.static(path.join(__dirname, "assets")));

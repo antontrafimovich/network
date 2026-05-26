@@ -12,7 +12,8 @@ int request_is_complete(char *buf)
     return strstr(buf, "\r\n\r\n") != NULL;
 }
 
-int response_is_complete(char *response, size_t response_size) {
+int response_is_complete(char *response, size_t response_size)
+{
     return response[response_size - 1] == '\n' && response[response_size - 2] == '\r' && response[response_size - 3] == '\n' && response[response_size - 4] == '\r' && response[response_size - 5] == '0';
 }
 
@@ -67,6 +68,7 @@ int tcp_on_connect(int sfd, void (*f)(int))
         struct sockaddr_in client_addr = {0};
         socklen_t client_addrlen = sizeof(client_addr);
         int client_socket;
+        printf("waiting for connection \n");
         if ((client_socket = accept(sfd, (struct sockaddr *)&client_addr, &client_addrlen)) == -1)
         {
             continue;
@@ -112,69 +114,69 @@ void on_connect(int client_socket)
     int upstream_socket;
     if ((upstream_socket = tcp_connect("127.0.0.1", 8081)) < 0)
     {
-        fprintf(stderr, "connect to the upstream server failed\n");
+        perror("connect to the upstream server failed\n");
         return;
     }
 
-    uint8_t buf[8192] = {0};
-    size_t used = 0;
+    uint8_t buf[8192];
     while (1)
     {
-        ssize_t recvr = recv(client_socket, buf + used, sizeof(buf) - used, 0);
+        ssize_t client_recv_result = recv(client_socket, buf, sizeof(buf), 0);
 
-        if (recvr == -1)
+        if (client_recv_result == -1)
         {
             perror("recv failed");
             printf("Error: %s\n", strerror(errno));
             continue;
         }
 
-        printf("->   *      %ld B\n", recvr);
+        printf("->   *      %ld B\n", client_recv_result);
 
-        if (recvr > 0)
+        if (client_recv_result == 0)
         {
-            send(upstream_socket, buf + used, recvr, 0);
+            close(client_socket);
+            close(upstream_socket);
+            printf("connection is closed\n");
+            return;
         }
 
-        if (recvr == 0 || request_is_complete(buf))
+        if (client_recv_result > 0)
         {
-            uint8_t upstream_buf[4096] = {0};
+            ssize_t upstream_send_result = send(upstream_socket, buf, client_recv_result, 0);
+            if (upstream_send_result == -1) {
+                perror("send to upstream failed, continueing\n");
+                continue;
+            }
+            printf("     * ->   %ld B\n", upstream_send_result);
+        }
+
+        {
+            uint8_t upstream_buf[4096];
 
             while (1)
             {
                 ssize_t upstream_recv_result = recv(upstream_socket, upstream_buf, sizeof(upstream_buf), 0);
                 printf("     * <-   %ld B\n", upstream_recv_result);
 
-                for (size_t i = 0; i < upstream_recv_result; i++) {
-                    printf("/%02x", upstream_buf[i]);
+                if (upstream_recv_result > 0)
+                {
+                    for (size_t i = 0; i < upstream_recv_result; i++)
+                    {
+                        printf("/%02x", upstream_buf[i]);
+                    }
+                    printf("\n");
                 }
-                printf("\n");
 
-                ssize_t sendr = send(client_socket, upstream_buf, upstream_recv_result, 0);
-                printf("<-   *      %ld B\n", sendr);
+                ssize_t client_send_result = send(client_socket, upstream_buf, upstream_recv_result, 0);
+                printf("<-   *      %ld B\n", client_send_result);
 
-
-
-                if (response_is_complete(upstream_buf, upstream_recv_result) || sendr == 0)
+                if (response_is_complete(upstream_buf, upstream_recv_result))
                 {
                     printf("response is complete \n");
                     break;
                 }
-
-                // break;
             }
-
-            used = 0;
-
-            if (recvr == 0) {
-                close(client_socket);
-                return;
-            }
-
-            continue;
         }
-
-        used += recvr;
     }
 }
 
