@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <netinet/ip.h>
@@ -7,14 +8,130 @@
 #include <unistd.h>
 #include <errno.h>
 
+#define CHUNKED_RESPONSE 1;
+#define CONTENT_LENGTH_RESPONSE 2;
+
+enum RESPONSE_TYPE
+{
+    UNKNOWN = -1,
+    CHUNKED = 1,
+    CONTENT_LENGTH = 2
+};
+
+struct response_type_data
+{
+    enum RESPONSE_TYPE response_type;
+    void *payload;
+};
+
 int request_is_complete(char *buf)
 {
     return strstr(buf, "\r\n\r\n") != NULL;
 }
 
-int response_is_complete(char *response, size_t response_size)
+int chunked_response_is_complete(char *response, size_t response_size)
 {
     return response[response_size - 1] == '\n' && response[response_size - 2] == '\r' && response[response_size - 3] == '\n' && response[response_size - 4] == '\r' && response[response_size - 5] == '0';
+}
+
+int content_length_response_is_complete(char *response, size_t response_size)
+{
+    return CHUNKED;
+}
+
+int get_response_type(char *response_with_headers, size_t response_size)
+{
+    int i;
+    char header_name[128], header_value[512];
+    size_t header_name_i = 0;
+    size_t header_value_i = 0;
+    unsigned char header_name_is_done = 0;
+    struct response_type_data response_type_data = {UNKNOWN, NULL};
+
+    for (i = 0; i < response_size; i++)
+    {
+        if (response_with_headers[i] == ':')
+        {
+            header_name[header_name_i] = '\0';
+            header_name_is_done = 1;
+            if (strncmp("Content-Length", header_name, header_name_i - 1) == 0)
+            {
+                response_type_data.response_type = CONTENT_LENGTH;
+                continue;
+            }
+
+            if (strncmp("transfer-encoding", header_name, header_name_i - 1) == 0)
+            {
+                response_type_data.response_type = CHUNKED;
+                return 0;
+            }
+        }
+
+        if (response_with_headers[i] == '\r' && response_with_headers[++i] == '\n')
+        {
+            // end of header section
+            if (header_name_i == 0 && header_value_i == 0)
+            {
+                return -1;
+            }
+
+            if (response_type_data.response_type == UNKNOWN)
+            {
+                header_value_i = 0;
+                header_name_i = 0;
+                header_name_is_done = 0;
+
+                continue;
+            }
+
+            header_value[header_value_i] = '\0';
+            response_type_data.payload = header_value;
+            return atoi(header_value);
+        }
+
+        if (header_name_is_done)
+        {
+            if (response_type_data.response_type == UNKNOWN)
+            {
+                continue;
+            }
+            header_value[header_value_i++] = response_with_headers[i];
+        }
+        else
+        {
+            header_name[header_name_i++] = response_with_headers[i];
+        }
+    }
+}
+
+int response_is_complete(char *response, size_t response_size)
+{
+    unsigned char is_chunked;
+
+    // logic for is chunked response analyze
+    int i;
+    char header_name[128], header_value[512];
+    size_t header_name_i = 0;
+    size_t header_value_i = 0;
+    unsigned char header_name_is_done = 0;
+
+    for (i = 0; i < response_size; i++)
+    {
+        if (response[i] == ':')
+        {
+            header_name[header_name_i] = '\0';
+            continue;
+        }
+
+        header_name[header_name_i++] = response[i];
+    }
+
+    if (is_chunked)
+    {
+        return chunked_response_is_complete(response, response_size);
+    }
+
+    return content_length_response_is_complete(response, response_size);
 }
 
 int tcp_listen(const char *host, in_port_t port)
@@ -119,6 +236,7 @@ void on_connect(int client_socket)
     }
 
     uint8_t buf[8192];
+
     while (1)
     {
         ssize_t client_recv_result = recv(client_socket, buf, sizeof(buf), 0);
@@ -143,7 +261,8 @@ void on_connect(int client_socket)
         if (client_recv_result > 0)
         {
             ssize_t upstream_send_result = send(upstream_socket, buf, client_recv_result, 0);
-            if (upstream_send_result == -1) {
+            if (upstream_send_result == -1)
+            {
                 perror("send to upstream failed, continueing\n");
                 continue;
             }
@@ -152,10 +271,15 @@ void on_connect(int client_socket)
 
         {
             uint8_t upstream_buf[4096];
+            ssize_t initial_upstream_recv_result = recv(upstream_socket, upstream_buf, sizeof(upstream_buf), 0);
+
+            int response_type = get_response_type(upstream_buf, initial_upstream_recv_result);
+            printf("Response type is %d\n", response_type);
 
             while (1)
             {
-                ssize_t upstream_recv_result = recv(upstream_socket, upstream_buf, sizeof(upstream_buf), 0);
+                ssize_t upstream_recv_result = initial_upstream_recv_result || recv(upstream_socket, upstream_buf, sizeof(upstream_buf), 0);
+                initial_upstream_recv_result = 0;
                 printf("     * <-   %ld B\n", upstream_recv_result);
 
                 if (upstream_recv_result > 0)
@@ -170,7 +294,7 @@ void on_connect(int client_socket)
                 ssize_t client_send_result = send(client_socket, upstream_buf, upstream_recv_result, 0);
                 printf("<-   *      %ld B\n", client_send_result);
 
-                if (response_is_complete(upstream_buf, upstream_recv_result))
+                if (chunked_response_is_complete(upstream_buf, upstream_recv_result))
                 {
                     printf("response is complete \n");
                     break;
