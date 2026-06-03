@@ -61,7 +61,7 @@ int process_response(char *response_with_headers, size_t response_size, struct r
                 continue;
             }
 
-            if (strncmp("transfer-encoding", header_name, header_name_i - 1) == 0)
+            if (strncmp("Transfer-Encoding", header_name, header_name_i - 1) == 0)
             {
                 response_info->response_type = CHUNKED;
                 response_info->response_size = 0;
@@ -143,7 +143,7 @@ int tcp_listen(const char *host, in_port_t port)
     if ((sfd = socket(AF_INET, SOCK_STREAM, 0)) == -1)
     {
         perror("socket failed");
-        return 1;
+        return -1;
     }
 
     int opt = 1;
@@ -154,7 +154,7 @@ int tcp_listen(const char *host, in_port_t port)
     if (inet_pton(AF_INET, host, &in_addr) < 1)
     {
         perror("inet_pton failed");
-        return 1;
+        return -1;
     }
 
     struct sockaddr_in addr =
@@ -166,13 +166,13 @@ int tcp_listen(const char *host, in_port_t port)
     if (bind(sfd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
     {
         perror("bind failed");
-        return 1;
+        return -1;
     }
 
     if (listen(sfd, 1024) != 0)
     {
         perror("listen failed");
-        return 1;
+        return -1;
     }
 
     printf("Server is listening on port %d\n", port);
@@ -190,6 +190,7 @@ int tcp_on_connect(int sfd, void (*f)(int))
         printf("waiting for connection \n");
         if ((client_socket = accept(sfd, (struct sockaddr *)&client_addr, &client_addrlen)) == -1)
         {
+            perror("accept failed \n");
             continue;
         }
 
@@ -323,7 +324,11 @@ void on_connect(int client_socket)
 
 int main(int argc, char *argv[])
 {
-    int sfd = tcp_listen("0.0.0.0", 8082);
+    int sfd;
+    if ((sfd = tcp_listen("0.0.0.0", 8082)) == -1) {
+        fprintf(stderr, "failed to create a client -> proxy socket\n");
+        return 1;
+    }
 
     tcp_on_connect(sfd, &on_connect);
 }
