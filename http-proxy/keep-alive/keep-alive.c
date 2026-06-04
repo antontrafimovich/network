@@ -229,7 +229,7 @@ int tcp_connect(const char *host, in_port_t port)
     return scon;
 }
 
-int on_recv(int socket, void (*f)(int socket, uint8_t *buf, ssize_t recv_result, int upstream_socket), int upstream_socket)
+int on_request(int socket, void (*f)(int socket, uint8_t *buf, ssize_t recv_result, int upstream_socket), int upstream_socket)
 {
     uint8_t recv_buffer[4096];
 
@@ -253,15 +253,13 @@ int on_recv(int socket, void (*f)(int socket, uint8_t *buf, ssize_t recv_result,
     }
 }
 
-void client_recv_handler(int client_socket, uint8_t *client_buffer, ssize_t size, int upstream_socket)
+int send_request(int upstream_socket, uint8_t *request_buffer, ssize_t request_buffer_size, void (*f)(uint8_t *response_buffer, ssize_t response_size, int client_socket), int client_socket)
 {
-    printf("->   *      %ld B\n", size);
-
-    ssize_t upstream_send_result = send(upstream_socket, client_buffer, size, 0);
+    ssize_t upstream_send_result = send(upstream_socket, request_buffer, request_buffer_size, 0);
     if (upstream_send_result == -1)
     {
         perror("send to upstream failed, continueing\n");
-        return;
+        return -1;
     }
 
     printf("     * ->   %ld B\n", upstream_send_result);
@@ -273,6 +271,7 @@ void client_recv_handler(int client_socket, uint8_t *client_buffer, ssize_t size
     process_response(upstream_buf, initial_upstream_recv_result, &response_info);
     ssize_t used = 0;
     ssize_t upstream_recv_result;
+
     while (1)
     {
         if (initial_upstream_recv_result)
@@ -285,21 +284,9 @@ void client_recv_handler(int client_socket, uint8_t *client_buffer, ssize_t size
         }
 
         initial_upstream_recv_result = 0;
-        printf("     * <-   %ld B\n", upstream_recv_result);
-
         used += upstream_recv_result;
 
-        if (upstream_recv_result > 0)
-        {
-            for (size_t i = 0; i < upstream_recv_result; i++)
-            {
-                printf("/%02x", upstream_buf[i]);
-            }
-            printf("\n");
-        }
-
-        ssize_t client_send_result = send(client_socket, upstream_buf, upstream_recv_result, 0);
-        printf("<-   *      %ld B\n", client_send_result);
+        f(upstream_buf, upstream_recv_result, client_socket);
 
         if (response_info.response_type == CHUNKED && chunked_response_is_complete(upstream_buf, upstream_recv_result))
         {
@@ -315,6 +302,21 @@ void client_recv_handler(int client_socket, uint8_t *client_buffer, ssize_t size
     }
 }
 
+void upstream_response_handler(uint8_t *upstream_response_buffer, ssize_t upstream_response_size, int client_socket)
+{
+    printf("     * <-   %ld B\n", upstream_response_size);
+
+    ssize_t client_send_result = send(client_socket, upstream_response_buffer, upstream_response_size, 0);
+    printf("<-   *      %ld B\n", client_send_result);
+}
+
+void client_request_hadnler(int client_socket, uint8_t *client_buffer, ssize_t size, int upstream_socket)
+{
+    printf("->   *      %ld B\n", size);
+
+    send_request(upstream_socket, client_buffer, size, &upstream_response_handler, client_socket);
+}
+
 void on_connect(int client_socket)
 {
     int upstream_socket;
@@ -324,7 +326,7 @@ void on_connect(int client_socket)
         return;
     }
 
-    if (on_recv(client_socket, &client_recv_handler, upstream_socket) == 0)
+    if (on_request(client_socket, &client_request_hadnler, upstream_socket) == 0)
     {
         close(client_socket);
         close(upstream_socket);
