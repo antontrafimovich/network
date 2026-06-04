@@ -229,6 +229,92 @@ int tcp_connect(const char *host, in_port_t port)
     return scon;
 }
 
+int on_recv(int socket, void (*f)(int socket, uint8_t *buf, ssize_t recv_result, int upstream_socket), int upstream_socket)
+{
+    uint8_t recv_buffer[4096];
+
+    while (1)
+    {
+        ssize_t recv_result = recv(socket, recv_buffer, sizeof(recv_buffer), 0);
+
+        if (recv_result == -1)
+        {
+            perror("recv failed");
+            continue;
+        }
+
+        if (recv_result == 0)
+        {
+            fprintf(stderr, "connection has been closed\n");
+            return 0;
+        }
+
+        f(socket, recv_buffer, recv_result, upstream_socket);
+    }
+}
+
+void client_recv_handler(int client_socket, uint8_t *client_buffer, ssize_t size, int upstream_socket)
+{
+    printf("->   *      %ld B\n", size);
+
+    ssize_t upstream_send_result = send(upstream_socket, client_buffer, size, 0);
+    if (upstream_send_result == -1)
+    {
+        perror("send to upstream failed, continueing\n");
+        return;
+    }
+
+    printf("     * ->   %ld B\n", upstream_send_result);
+
+    uint8_t upstream_buf[4096];
+    ssize_t initial_upstream_recv_result = recv(upstream_socket, upstream_buf, sizeof(upstream_buf), 0);
+
+    struct response_info response_info = {0};
+    process_response(upstream_buf, initial_upstream_recv_result, &response_info);
+    ssize_t used = 0;
+    ssize_t upstream_recv_result;
+    while (1)
+    {
+        if (initial_upstream_recv_result)
+        {
+            upstream_recv_result = initial_upstream_recv_result;
+        }
+        else
+        {
+            upstream_recv_result = recv(upstream_socket, upstream_buf, sizeof(upstream_buf), 0);
+        }
+
+        initial_upstream_recv_result = 0;
+        printf("     * <-   %ld B\n", upstream_recv_result);
+
+        used += upstream_recv_result;
+
+        if (upstream_recv_result > 0)
+        {
+            for (size_t i = 0; i < upstream_recv_result; i++)
+            {
+                printf("/%02x", upstream_buf[i]);
+            }
+            printf("\n");
+        }
+
+        ssize_t client_send_result = send(client_socket, upstream_buf, upstream_recv_result, 0);
+        printf("<-   *      %ld B\n", client_send_result);
+
+        if (response_info.response_type == CHUNKED && chunked_response_is_complete(upstream_buf, upstream_recv_result))
+        {
+            printf("chunked response is complete\n");
+            break;
+        }
+
+        if (response_info.response_type == CONTENT_LENGTH && used >= response_info.header_size + response_info.response_size)
+        {
+            printf("content length response is complete\n");
+            break;
+        }
+    }
+}
+
 void on_connect(int client_socket)
 {
     int upstream_socket;
@@ -238,94 +324,18 @@ void on_connect(int client_socket)
         return;
     }
 
-    uint8_t buf[8192];
-
-    while (1)
+    if (on_recv(client_socket, &client_recv_handler, upstream_socket) == 0)
     {
-        ssize_t client_recv_result = recv(client_socket, buf, sizeof(buf), 0);
-
-        if (client_recv_result == -1)
-        {
-            perror("recv failed");
-            printf("Error: %s\n", strerror(errno));
-            continue;
-        }
-
-        printf("->   *      %ld B\n", client_recv_result);
-
-        if (client_recv_result == 0)
-        {
-            close(client_socket);
-            close(upstream_socket);
-            printf("connection is closed\n");
-            return;
-        }
-
-        if (client_recv_result > 0)
-        {
-            ssize_t upstream_send_result = send(upstream_socket, buf, client_recv_result, 0);
-            if (upstream_send_result == -1)
-            {
-                perror("send to upstream failed, continueing\n");
-                continue;
-            }
-            printf("     * ->   %ld B\n", upstream_send_result);
-        }
-
-        uint8_t upstream_buf[4096];
-        ssize_t initial_upstream_recv_result = recv(upstream_socket, upstream_buf, sizeof(upstream_buf), 0);
-
-        struct response_info response_info = {0};
-        process_response(upstream_buf, initial_upstream_recv_result, &response_info);
-        ssize_t used = 0;
-        ssize_t upstream_recv_result;
-        while (1)
-        {
-            if (initial_upstream_recv_result)
-            {
-                upstream_recv_result = initial_upstream_recv_result;
-            }
-            else
-            {
-                upstream_recv_result = recv(upstream_socket, upstream_buf, sizeof(upstream_buf), 0);
-            }
-
-            initial_upstream_recv_result = 0;
-            printf("     * <-   %ld B\n", upstream_recv_result);
-
-            used += upstream_recv_result;
-
-            if (upstream_recv_result > 0)
-            {
-                for (size_t i = 0; i < upstream_recv_result; i++)
-                {
-                    printf("/%02x", upstream_buf[i]);
-                }
-                printf("\n");
-            }
-
-            ssize_t client_send_result = send(client_socket, upstream_buf, upstream_recv_result, 0);
-            printf("<-   *      %ld B\n", client_send_result);
-
-            if (response_info.response_type == CHUNKED && chunked_response_is_complete(upstream_buf, upstream_recv_result))
-            {
-                printf("chunked response is complete\n");
-                break;
-            }
-
-            if (response_info.response_type == CONTENT_LENGTH && used >= response_info.header_size + response_info.response_size)
-            {
-                printf("content length response is complete\n");
-                break;
-            }
-        }
-    }
+        close(client_socket);
+        close(upstream_socket);
+    };
 }
 
 int main(int argc, char *argv[])
 {
     int sfd;
-    if ((sfd = tcp_listen("0.0.0.0", 8082)) == -1) {
+    if ((sfd = tcp_listen("0.0.0.0", 8082)) == -1)
+    {
         fprintf(stderr, "failed to create a client -> proxy socket\n");
         return 1;
     }
