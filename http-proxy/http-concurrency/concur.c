@@ -181,12 +181,12 @@ int tcp_listen(const char *host, in_port_t port)
     return sfd;
 }
 
-int tcp_on_connect(int sfd, void (*f)(int))
+int tcp_on_connect(int sfd, void (*f)(int, int), int upstream_socket)
 {
     struct sockaddr_in client_addrs[10] = {0};
     size_t len = 0;
 
-    struct pollfd pfds[4] = {0};
+    struct pollfd pfds[10] = {0};
 
     pfds[0].fd = sfd;
     pfds[0].events = POLLIN;
@@ -199,6 +199,8 @@ int tcp_on_connect(int sfd, void (*f)(int))
 
         ready = poll(pfds, npfds, -1);
 
+        printf("Ready status is %d\n", ready);
+
         if (ready == -1)
         {
             perror("poll failed");
@@ -208,7 +210,11 @@ int tcp_on_connect(int sfd, void (*f)(int))
         int i;
         for (i = 0; i < npfds; i++)
         {
-            printf("fd=%d; events: %s%s%s\n", pfds[i].fd, (pfds[i].revents & POLLIN) ? "POLLIN " : "", (pfds[i].revents & POLLHUP) ? "POLLHUP " : "", (pfds[i].revents & POLLERR) ? "POLLERR" : "");
+            if (pfds[i].revents == 0) {
+                continue;
+            }
+
+            printf("fd=%d; events value: %d, events: %s%s%s%s\n", pfds[i].fd, pfds[i].revents, (pfds[i].revents & POLLIN) ? "POLLIN " : "", (pfds[i].revents & POLLHUP) ? "POLLHUP " : "", (pfds[i].revents & POLLERR) ? "POLLERR" : "", (pfds[i].revents & POLLNVAL) ? "POLLNVAL" : "");
 
             if (i == 0 && pfds[i].revents & POLLIN)
             {
@@ -228,8 +234,17 @@ int tcp_on_connect(int sfd, void (*f)(int))
                 continue;
             }
 
-            if (pfds[i].revents & POLLIN) {
-                f(pfds[i].fd);
+            if (pfds[i].revents & POLLIN)
+            {
+                f(pfds[i].fd, upstream_socket);
+            }
+
+            if (pfds[i].revents & POLLNVAL)
+            {
+                printf("closing fd=%d\n", pfds[i].fd);
+                close(pfds[i].fd);
+                pfds[i].fd = -1;
+                npfds--;
             }
         }
     }
@@ -269,30 +284,31 @@ int on_request(int socket, void (*f)(int socket, uint8_t *buf, ssize_t recv_resu
 
     // while (1)
     // {
-        ssize_t recv_result = recv(socket, recv_buffer, sizeof(recv_buffer), 0);
+    ssize_t recv_result = recv(socket, recv_buffer, sizeof(recv_buffer), 0);
 
-        if (recv_result == -1)
-        {
-            perror("recv failed");
-            return -1;
-        }
+    if (recv_result == -1)
+    {
+        perror("recv failed");
+        return -1;
+    }
 
-        if (recv_result == 0)
-        {
-            fprintf(stderr, "connection has been closed\n");
-            return 0;
-        }
+    if (recv_result == 0)
+    {
+        fprintf(stderr, "connection has been closed\n");
+        return 0;
+    }
 
-        f(socket, recv_buffer, recv_result, upstream_socket);
+    f(socket, recv_buffer, recv_result, upstream_socket);
     // }
 }
 
 int send_request(int upstream_socket, uint8_t *request_buffer, ssize_t request_buffer_size, void (*f)(uint8_t *response_buffer, ssize_t response_size, int client_socket), int client_socket)
 {
+    printf("Sending request to upstream socket=%d\n", upstream_socket);
     ssize_t upstream_send_result = send(upstream_socket, request_buffer, request_buffer_size, 0);
     if (upstream_send_result == -1)
     {
-        perror("send to upstream failed, continueing\n");
+        perror("send to upstream failed");
         return -1;
     }
 
@@ -344,23 +360,16 @@ void upstream_response_handler(uint8_t *upstream_response_buffer, ssize_t upstre
     printf("<-   *      %ld B\n", client_send_result);
 }
 
-void client_request_hadnler(int client_socket, uint8_t *client_buffer, ssize_t size, int upstream_socket)
+void client_request_handler(int client_socket, uint8_t *client_buffer, ssize_t size, int upstream_socket)
 {
     printf("->   *      %ld B\n", size);
 
     send_request(upstream_socket, client_buffer, size, &upstream_response_handler, client_socket);
 }
 
-void on_connect(int client_socket)
+void on_connect(int client_socket, int upstream_socket)
 {
-    int upstream_socket;
-    if ((upstream_socket = tcp_connect("127.0.0.1", 8081)) < 0)
-    {
-        perror("connect to the upstream server failed\n");
-        return;
-    }
-
-    if (on_request(client_socket, &client_request_hadnler, upstream_socket) == 0)
+    if (on_request(client_socket, &client_request_handler, upstream_socket) == 0)
     {
         close(client_socket);
         close(upstream_socket);
@@ -372,9 +381,16 @@ int main(int argc, char *argv[])
     int sfd;
     if ((sfd = tcp_listen("0.0.0.0", 8082)) == -1)
     {
-        fprintf(stderr, "failed to create a client -> proxy socket\n");
+        fprintf(stderr, "failed to listen on 0.0.0.0:8082\n");
         return 1;
     }
 
-    tcp_on_connect(sfd, &on_connect);
+    int upstream_socket;
+    if ((upstream_socket = tcp_connect("127.0.0.1", 8081)) < 0)
+    {
+        perror("failed to connect to the upstream server\n");
+        return 1;
+    }
+
+    tcp_on_connect(sfd, &on_connect, upstream_socket);
 }
