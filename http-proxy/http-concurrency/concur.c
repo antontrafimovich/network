@@ -26,6 +26,72 @@ struct response_info
     size_t header_size;
 };
 
+struct upstream_connection
+{
+    char *host;
+    in_port_t port;
+    int _fd;
+    int8_t _response;
+};
+
+int upstream_connection_create(struct upstream_connection *uc)
+{
+    int scon = socket(AF_INET, SOCK_STREAM, 0);
+
+    struct in_addr in_addr;
+
+    if (inet_pton(AF_INET, uc->host, &in_addr) < 1)
+    {
+        perror("inet_pton failed");
+        printf("Error: %s\n", strerror(errno));
+        return -1;
+    }
+
+    struct sockaddr_in addr =
+        {
+            AF_INET,
+            htons(uc->port),
+            in_addr};
+
+    if (connect(scon, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+    {
+        perror("connect failed");
+        return -1;
+    };
+
+    uc->_fd = scon;
+
+    return 0;
+}
+
+int upstream_connection_destroy(struct upstream_connection *uc)
+{
+    close(uc->_fd);
+    return 0;
+}
+
+int upstream_connection_send(struct upstream_connection *uc, uint8_t *request_buffer, ssize_t request_buffer_size)
+{
+    while (1)
+    {
+        printf("Sending request to upstream socket=%d\n", uc->_fd);
+
+        ssize_t upstream_send_result = send(uc->_fd, request_buffer, request_buffer_size, 0);
+
+        if (upstream_send_result == -1)
+        {
+            perror("Send to upstream failed");
+            upstream_connection_destroy(uc);
+            upstream_connection_create(uc);
+            printf("Connection was recreated, new fd=%d\n", uc->_fd);
+            continue;
+        }
+
+        printf("     * ->   %ld B\n", upstream_send_result);
+        return upstream_send_result;
+    }
+}
+
 int request_is_complete(char *buf)
 {
     return strstr(buf, "\r\n\r\n") != NULL;
@@ -181,7 +247,7 @@ int tcp_listen(const char *host, in_port_t port)
     return sfd;
 }
 
-int tcp_on_connect(int sfd, void (*f)(int, int), int upstream_socket)
+int tcp_on_connect(int sfd, void (*f)(int, struct upstream_connection *), struct upstream_connection *uc)
 {
     struct sockaddr_in client_addrs[10] = {0};
     size_t len = 0;
@@ -210,7 +276,8 @@ int tcp_on_connect(int sfd, void (*f)(int, int), int upstream_socket)
         int i;
         for (i = 0; i < npfds; i++)
         {
-            if (pfds[i].revents == 0) {
+            if (pfds[i].revents == 0)
+            {
                 continue;
             }
 
@@ -236,7 +303,7 @@ int tcp_on_connect(int sfd, void (*f)(int, int), int upstream_socket)
 
             if (pfds[i].revents & POLLIN)
             {
-                f(pfds[i].fd, upstream_socket);
+                f(pfds[i].fd, uc);
             }
 
             if (pfds[i].revents & POLLNVAL)
@@ -278,7 +345,7 @@ int tcp_connect(const char *host, in_port_t port)
     return scon;
 }
 
-int on_request(int socket, void (*f)(int socket, uint8_t *buf, ssize_t recv_result, int upstream_socket), int upstream_socket)
+int on_request(int socket, void (*f)(int socket, uint8_t *buf, ssize_t recv_result, struct upstream_connection *), struct upstream_connection *uc)
 {
     uint8_t recv_buffer[4096];
 
@@ -298,14 +365,14 @@ int on_request(int socket, void (*f)(int socket, uint8_t *buf, ssize_t recv_resu
         return 0;
     }
 
-    f(socket, recv_buffer, recv_result, upstream_socket);
+    f(socket, recv_buffer, recv_result, uc);
     // }
 }
 
-int send_request(int upstream_socket, uint8_t *request_buffer, ssize_t request_buffer_size, void (*f)(uint8_t *response_buffer, ssize_t response_size, int client_socket), int client_socket)
+int send_request(struct upstream_connection *uc, uint8_t *request_buffer, ssize_t request_buffer_size, void (*f)(uint8_t *response_buffer, ssize_t response_size, int client_socket), int client_socket)
 {
-    printf("Sending request to upstream socket=%d\n", upstream_socket);
-    ssize_t upstream_send_result = send(upstream_socket, request_buffer, request_buffer_size, 0);
+    ssize_t upstream_send_result = upstream_connection_send(uc, request_buffer, request_buffer_size);
+
     if (upstream_send_result == -1)
     {
         perror("send to upstream failed");
@@ -315,7 +382,7 @@ int send_request(int upstream_socket, uint8_t *request_buffer, ssize_t request_b
     printf("     * ->   %ld B\n", upstream_send_result);
 
     uint8_t upstream_buf[4096];
-    ssize_t initial_upstream_recv_result = recv(upstream_socket, upstream_buf, sizeof(upstream_buf), 0);
+    ssize_t initial_upstream_recv_result = recv(uc->_fd, upstream_buf, sizeof(upstream_buf), 0);
 
     struct response_info response_info = {0};
     process_response(upstream_buf, initial_upstream_recv_result, &response_info);
@@ -330,7 +397,7 @@ int send_request(int upstream_socket, uint8_t *request_buffer, ssize_t request_b
         }
         else
         {
-            upstream_recv_result = recv(upstream_socket, upstream_buf, sizeof(upstream_buf), 0);
+            upstream_recv_result = recv(uc->_fd, upstream_buf, sizeof(upstream_buf), 0);
         }
 
         initial_upstream_recv_result = 0;
@@ -360,19 +427,19 @@ void upstream_response_handler(uint8_t *upstream_response_buffer, ssize_t upstre
     printf("<-   *      %ld B\n", client_send_result);
 }
 
-void client_request_handler(int client_socket, uint8_t *client_buffer, ssize_t size, int upstream_socket)
+void client_request_handler(int client_socket, uint8_t *client_buffer, ssize_t size, struct upstream_connection *uc)
 {
     printf("->   *      %ld B\n", size);
 
-    send_request(upstream_socket, client_buffer, size, &upstream_response_handler, client_socket);
+    send_request(uc, client_buffer, size, &upstream_response_handler, client_socket);
 }
 
-void on_connect(int client_socket, int upstream_socket)
+void on_connect(int client_socket, struct upstream_connection *uc)
 {
-    if (on_request(client_socket, &client_request_handler, upstream_socket) == 0)
+    if (on_request(client_socket, &client_request_handler, uc) == 0)
     {
         close(client_socket);
-        close(upstream_socket);
+        upstream_connection_destroy(uc);
     };
 }
 
@@ -385,12 +452,18 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    int upstream_socket;
-    if ((upstream_socket = tcp_connect("127.0.0.1", 8081)) < 0)
+    struct upstream_connection u_connection = {0};
+
+    u_connection.host = "127.0.0.1";
+    u_connection.port = 8081;
+
+    upstream_connection_create(&u_connection);
+
+    if (upstream_connection_create(&u_connection) < 0)
     {
-        perror("failed to connect to the upstream server\n");
+        perror("Failed to create upstream server connection");
         return 1;
     }
 
-    tcp_on_connect(sfd, &on_connect, upstream_socket);
+    tcp_on_connect(sfd, &on_connect, &u_connection);
 }
