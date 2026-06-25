@@ -31,80 +31,12 @@ struct upstream_connection
     char *host;
     in_port_t port;
     int _fd;
-    int8_t _response;
+    int8_t _response[8192];
 };
-
-int upstream_connection_create(struct upstream_connection *uc)
-{
-    int scon = socket(AF_INET, SOCK_STREAM, 0);
-
-    struct in_addr in_addr;
-
-    if (inet_pton(AF_INET, uc->host, &in_addr) < 1)
-    {
-        perror("inet_pton failed");
-        printf("Error: %s\n", strerror(errno));
-        return -1;
-    }
-
-    struct sockaddr_in addr =
-        {
-            AF_INET,
-            htons(uc->port),
-            in_addr};
-
-    if (connect(scon, (struct sockaddr *)&addr, sizeof(addr)) != 0)
-    {
-        perror("connect failed");
-        return -1;
-    };
-
-    uc->_fd = scon;
-
-    return 0;
-}
-
-int upstream_connection_destroy(struct upstream_connection *uc)
-{
-    close(uc->_fd);
-    return 0;
-}
-
-int upstream_connection_send(struct upstream_connection *uc, uint8_t *request_buffer, ssize_t request_buffer_size)
-{
-    while (1)
-    {
-        printf("Sending request to upstream socket=%d\n", uc->_fd);
-
-        ssize_t upstream_send_result = send(uc->_fd, request_buffer, request_buffer_size, 0);
-
-        if (upstream_send_result == -1)
-        {
-            perror("Send to upstream failed");
-            upstream_connection_destroy(uc);
-            upstream_connection_create(uc);
-            printf("Connection was recreated, new fd=%d\n", uc->_fd);
-            continue;
-        }
-
-        printf("     * ->   %ld B\n", upstream_send_result);
-        return upstream_send_result;
-    }
-}
-
-int request_is_complete(char *buf)
-{
-    return strstr(buf, "\r\n\r\n") != NULL;
-}
 
 int chunked_response_is_complete(char *response, size_t response_size)
 {
     return response[response_size - 1] == '\n' && response[response_size - 2] == '\r' && response[response_size - 3] == '\n' && response[response_size - 4] == '\r' && response[response_size - 5] == '0';
-}
-
-int content_length_response_is_complete(char *response, size_t response_size)
-{
-    return CHUNKED;
 }
 
 int process_response(char *response_with_headers, size_t response_size, struct response_info *response_info)
@@ -171,6 +103,118 @@ int process_response(char *response_with_headers, size_t response_size, struct r
             header_name[header_name_i++] = response_with_headers[i];
         }
     }
+}
+
+int upstream_connection_create(struct upstream_connection *uc)
+{
+    int scon = socket(AF_INET, SOCK_STREAM, 0);
+
+    struct in_addr in_addr;
+
+    if (inet_pton(AF_INET, uc->host, &in_addr) < 1)
+    {
+        perror("inet_pton failed");
+        printf("Error: %s\n", strerror(errno));
+        return -1;
+    }
+
+    struct sockaddr_in addr =
+        {
+            AF_INET,
+            htons(uc->port),
+            in_addr};
+
+    if (connect(scon, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+    {
+        perror("connect failed");
+        return -1;
+    };
+
+    uc->_fd = scon;
+
+    return 0;
+}
+
+int upstream_connection_destroy(struct upstream_connection *uc)
+{
+    close(uc->_fd);
+    return 0;
+}
+
+int upstream_connection_send(struct upstream_connection *uc, uint8_t *request_buffer, ssize_t request_buffer_size)
+{
+    while (1)
+    {
+        printf("Sending request to upstream socket=%d\n", uc->_fd);
+
+        ssize_t upstream_send_result = send(uc->_fd, request_buffer, request_buffer_size, 0);
+
+        if (upstream_send_result == -1)
+        {
+            perror("Send to upstream failed");
+            upstream_connection_destroy(uc);
+            upstream_connection_create(uc);
+            printf("Connection was recreated, new fd=%d\n", uc->_fd);
+            continue;
+        }
+
+        printf("     * ->   %ld B\n", upstream_send_result);
+        return upstream_send_result;
+    }
+}
+
+int upstream_connection_pipe(struct upstream_connection *uc, void (*f)(uint8_t *response_buffer, ssize_t response_size, int client_socket), int client_socket)
+{
+
+    struct response_info response_info = {0};
+    ssize_t used = 0, headers_used = 0;
+    ssize_t upstream_recv_result;
+
+    while (1)
+    {
+        ssize_t upstream_recv_result = recv(uc->_fd, uc->_response + headers_used, sizeof(uc->_response) - headers_used, 0);
+
+        if (response_info.response_type == UNKNOWN || !response_info.response_type)
+        {
+            process_response(uc->_response, upstream_recv_result, &response_info);
+        }
+
+        used += upstream_recv_result;
+
+        f(uc->_response + headers_used, upstream_recv_result, client_socket);
+
+        if (response_info.response_type == UNKNOWN)
+        {
+
+            headers_used += upstream_recv_result;
+        }
+        else
+        {
+            headers_used = 0;
+        }
+
+        if (response_info.response_type == CHUNKED && chunked_response_is_complete(uc->_response, upstream_recv_result))
+        {
+            printf("chunked response is complete\n");
+            return 0;
+        }
+
+        if (response_info.response_type == CONTENT_LENGTH && used >= response_info.header_size + response_info.response_size)
+        {
+            printf("content length response is complete\n");
+            return 0;
+        }
+    }
+}
+
+int request_is_complete(char *buf)
+{
+    return strstr(buf, "\r\n\r\n") != NULL;
+}
+
+int content_length_response_is_complete(char *response, size_t response_size)
+{
+    return CHUNKED;
 }
 
 int response_is_complete(char *response, size_t response_size)
@@ -265,7 +309,7 @@ int tcp_on_connect(int sfd, void (*f)(int, struct upstream_connection *), struct
 
         ready = poll(pfds, npfds, -1);
 
-        printf("Ready status is %d\n", ready);
+        printf("%d events happened in poll\n", ready);
 
         if (ready == -1)
         {
@@ -276,12 +320,25 @@ int tcp_on_connect(int sfd, void (*f)(int, struct upstream_connection *), struct
         int i;
         for (i = 0; i < npfds; i++)
         {
+            if (ready == 0) {
+                break;
+            }
+
             if (pfds[i].revents == 0)
             {
                 continue;
             }
 
-            printf("fd=%d; events value: %d, events: %s%s%s%s\n", pfds[i].fd, pfds[i].revents, (pfds[i].revents & POLLIN) ? "POLLIN " : "", (pfds[i].revents & POLLHUP) ? "POLLHUP " : "", (pfds[i].revents & POLLERR) ? "POLLERR" : "", (pfds[i].revents & POLLNVAL) ? "POLLNVAL" : "");
+            printf("fd=%d (%s);\t"
+                "events value: %d,\t"
+                "events: %s%s%s%s\n",
+                pfds[i].fd,
+                i == 0 ? "event on connections listening socket" : "event on connection data socket",
+                pfds[i].revents,
+                (pfds[i].revents & POLLIN) ? "POLLIN " : "",
+                (pfds[i].revents & POLLHUP) ? "POLLHUP " : "",
+                (pfds[i].revents & POLLERR) ? "POLLERR" : "",
+                (pfds[i].revents & POLLNVAL) ? "POLLNVAL" : "");
 
             if (i == 0 && pfds[i].revents & POLLIN)
             {
@@ -293,11 +350,12 @@ int tcp_on_connect(int sfd, void (*f)(int, struct upstream_connection *), struct
                     continue;
                 }
 
-                printf("New connection from ('%s', '%d')\n", inet_ntoa(client_addrs[len].sin_addr), ntohs(client_addrs[len].sin_port));
+                printf("New connection from ('%s', '%d'), fd=%d\n", inet_ntoa(client_addrs[len].sin_addr), ntohs(client_addrs[len].sin_port), client_socket);
                 pfds[npfds].fd = client_socket;
                 pfds[npfds].events = POLLIN;
                 npfds++;
                 len++;
+                ready--;
                 continue;
             }
 
@@ -311,8 +369,10 @@ int tcp_on_connect(int sfd, void (*f)(int, struct upstream_connection *), struct
                 printf("closing fd=%d\n", pfds[i].fd);
                 close(pfds[i].fd);
                 pfds[i].fd = -1;
-                npfds--;
+                // npfds--;
             }
+
+            ready--;
         }
     }
 }
@@ -349,8 +409,6 @@ int on_request(int socket, void (*f)(int socket, uint8_t *buf, ssize_t recv_resu
 {
     uint8_t recv_buffer[4096];
 
-    // while (1)
-    // {
     ssize_t recv_result = recv(socket, recv_buffer, sizeof(recv_buffer), 0);
 
     if (recv_result == -1)
@@ -366,7 +424,7 @@ int on_request(int socket, void (*f)(int socket, uint8_t *buf, ssize_t recv_resu
     }
 
     f(socket, recv_buffer, recv_result, uc);
-    // }
+    return 1;
 }
 
 int send_request(struct upstream_connection *uc, uint8_t *request_buffer, ssize_t request_buffer_size, void (*f)(uint8_t *response_buffer, ssize_t response_size, int client_socket), int client_socket)
@@ -381,42 +439,7 @@ int send_request(struct upstream_connection *uc, uint8_t *request_buffer, ssize_
 
     printf("     * ->   %ld B\n", upstream_send_result);
 
-    uint8_t upstream_buf[4096];
-    ssize_t initial_upstream_recv_result = recv(uc->_fd, upstream_buf, sizeof(upstream_buf), 0);
-
-    struct response_info response_info = {0};
-    process_response(upstream_buf, initial_upstream_recv_result, &response_info);
-    ssize_t used = 0;
-    ssize_t upstream_recv_result;
-
-    while (1)
-    {
-        if (initial_upstream_recv_result)
-        {
-            upstream_recv_result = initial_upstream_recv_result;
-        }
-        else
-        {
-            upstream_recv_result = recv(uc->_fd, upstream_buf, sizeof(upstream_buf), 0);
-        }
-
-        initial_upstream_recv_result = 0;
-        used += upstream_recv_result;
-
-        f(upstream_buf, upstream_recv_result, client_socket);
-
-        if (response_info.response_type == CHUNKED && chunked_response_is_complete(upstream_buf, upstream_recv_result))
-        {
-            printf("chunked response is complete\n");
-            break;
-        }
-
-        if (response_info.response_type == CONTENT_LENGTH && used >= response_info.header_size + response_info.response_size)
-        {
-            printf("content length response is complete\n");
-            break;
-        }
-    }
+    upstream_connection_pipe(uc, f, client_socket);
 }
 
 void upstream_response_handler(uint8_t *upstream_response_buffer, ssize_t upstream_response_size, int client_socket)
@@ -439,7 +462,7 @@ void on_connect(int client_socket, struct upstream_connection *uc)
     if (on_request(client_socket, &client_request_handler, uc) == 0)
     {
         close(client_socket);
-        upstream_connection_destroy(uc);
+        // upstream_connection_destroy(uc);
     };
 }
 
@@ -456,8 +479,6 @@ int main(int argc, char *argv[])
 
     u_connection.host = "127.0.0.1";
     u_connection.port = 8081;
-
-    upstream_connection_create(&u_connection);
 
     if (upstream_connection_create(&u_connection) < 0)
     {
