@@ -12,6 +12,108 @@
 #define CHUNKED_RESPONSE 1;
 #define CONTENT_LENGTH_RESPONSE 2;
 
+struct event_loop_action
+{
+    int (*action)(int fd, void *payload);
+    void *payload;
+};
+
+struct event_loop
+{
+    struct pollfd _pfds[10];
+    size_t _npfds;
+    struct event_loop_action *_actions[10];
+};
+
+struct event_loop event_loop = {0};
+
+int event_loop_init(struct event_loop *el)
+{
+    return 0;
+}
+
+int event_loop_destroy(struct event_loop *el)
+{
+    int i;
+
+    for (i = 0; i < el->_npfds; i++)
+    {
+        close(el->_pfds[i].fd);
+    }
+
+    return 0;
+}
+
+int event_loop_add(struct event_loop *el, int fd, short int events, struct event_loop_action *action)
+{
+    el->_pfds[el->_npfds].fd = fd;
+    el->_pfds[el->_npfds].events = events;
+
+    el->_actions[el->_npfds] = action;
+
+    el->_npfds++;
+
+    return 0;
+}
+
+int event_loop_start(struct event_loop *el)
+{
+    while (1)
+    {
+        int ready;
+
+        ready = poll(el->_pfds, el->_npfds, -1);
+
+        printf("%d events happened in poll\n", ready);
+
+        if (ready == -1)
+        {
+            perror("poll failed");
+            exit(EXIT_FAILURE);
+        }
+
+        int i;
+        for (i = 0; i < el->_npfds; i++)
+        {
+            if (ready == 0)
+            {
+                break;
+            }
+
+            if (el->_pfds[i].revents == 0)
+            {
+                continue;
+            }
+
+            printf("fd=%d (%s);\t"
+                   "events value: %d,\t"
+                   "events: %s%s%s%s\n",
+                   el->_pfds[i].fd,
+                   i == 0 ? "event on connections listening socket" : "event on connection data socket",
+                   el->_pfds[i].revents,
+                   (el->_pfds[i].revents & POLLIN) ? "POLLIN " : "",
+                   (el->_pfds[i].revents & POLLHUP) ? "POLLHUP " : "",
+                   (el->_pfds[i].revents & POLLERR) ? "POLLERR" : "",
+                   (el->_pfds[i].revents & POLLNVAL) ? "POLLNVAL" : "");
+
+            if (el->_pfds[i].revents & el->_pfds[i].events)
+            {
+                el->_actions[i]->action(el->_pfds[i].fd, el->_actions[i]->payload);
+            }
+
+            if (el->_pfds[i].revents & POLLNVAL)
+            {
+                printf("closing fd=%d\n", el->_pfds[i].fd);
+                close(el->_pfds[i].fd);
+                el->_pfds[i].fd = -1;
+                // npfds--;
+            }
+
+            ready--;
+        }
+    }
+}
+
 enum RESPONSE_TYPE
 {
     UNKNOWN = -1,
@@ -31,6 +133,11 @@ struct upstream_connection
     char *host;
     in_port_t port;
     int _fd;
+    int8_t _response[8192];
+};
+
+struct upstream_connection_request
+{
     int8_t _response[8192];
 };
 
@@ -143,7 +250,9 @@ int upstream_connection_destroy(struct upstream_connection *uc)
 
 int upstream_connection_send(struct upstream_connection *uc, uint8_t *request_buffer, ssize_t request_buffer_size)
 {
-    while (1)
+    ssize_t sent = 0;
+
+    while (sent < request_buffer_size)
     {
         printf("Sending request to upstream socket=%d\n", uc->_fd);
 
@@ -155,20 +264,33 @@ int upstream_connection_send(struct upstream_connection *uc, uint8_t *request_bu
             upstream_connection_destroy(uc);
             upstream_connection_create(uc);
             printf("Connection was recreated, new fd=%d\n", uc->_fd);
+            sent = 0;
             continue;
         }
+
+        sent += upstream_send_result;
 
         printf("     * ->   %ld B\n", upstream_send_result);
         return upstream_send_result;
     }
 }
 
-int upstream_connection_pipe(struct upstream_connection *uc, void (*f)(uint8_t *response_buffer, ssize_t response_size, int client_socket), int client_socket)
+struct upstream_connection_pipe_payload
 {
+    void (*cb)(uint8_t *response_buffer, ssize_t response_size, int client_socket);
+    struct upstream_connection *uc;
+    int client_socket;
+};
+
+int upstream_connection_pipe(int upstream_socket, void *payload)
+{
+    struct upstream_connection_pipe_payload *ucp_payload = payload;
+    int client_socket = ucp_payload->client_socket;
+    void (*cb)(uint8_t *response_buffer, ssize_t response_size, int client_socket) = ucp_payload->cb;
+    struct upstream_connection *uc = ucp_payload->uc;
 
     struct response_info response_info = {0};
     ssize_t used = 0, headers_used = 0;
-    ssize_t upstream_recv_result;
 
     while (1)
     {
@@ -181,7 +303,7 @@ int upstream_connection_pipe(struct upstream_connection *uc, void (*f)(uint8_t *
 
         used += upstream_recv_result;
 
-        f(uc->_response + headers_used, upstream_recv_result, client_socket);
+        cb(uc->_response + headers_used, upstream_recv_result, client_socket);
 
         if (response_info.response_type == UNKNOWN)
         {
@@ -291,90 +413,86 @@ int tcp_listen(const char *host, in_port_t port)
     return sfd;
 }
 
-int tcp_on_connect(int sfd, void (*f)(int, struct upstream_connection *), struct upstream_connection *uc)
+int send_request(struct upstream_connection *uc, uint8_t *request_buffer, ssize_t request_buffer_size, void (*f)(uint8_t *response_buffer, ssize_t response_size, int client_socket), int client_socket)
 {
+    ssize_t upstream_send_result = upstream_connection_send(uc, request_buffer, request_buffer_size);
+
+    if (upstream_send_result == -1)
+    {
+        perror("send to upstream failed");
+        return -1;
+    }
+
+    struct upstream_connection_pipe_payload *ucp_payload = calloc(1, sizeof(struct upstream_connection_pipe_payload));
+    ucp_payload->cb = f;
+    ucp_payload->client_socket = client_socket;
+    ucp_payload->uc = uc;
+
+    struct event_loop_action *el_action = calloc(1, sizeof(struct event_loop_action));
+    el_action->action = &upstream_connection_pipe;
+    el_action->payload = (void *)ucp_payload;
+
+    event_loop_add(&event_loop, uc->_fd, POLLIN, el_action);
+    return 1;
+}
+
+void upstream_response_handler(uint8_t *upstream_response_buffer, ssize_t upstream_response_size, int client_socket)
+{
+    printf("     * <-   %ld B\n", upstream_response_size);
+
+    ssize_t client_send_result = send(client_socket, upstream_response_buffer, upstream_response_size, 0);
+    printf("<-   *      %ld B\n", client_send_result);
+}
+
+int on_data(int client_socket, void *payload)
+{
+    struct upstream_connection *uc = payload;
+    uint8_t recv_buffer[4096];
+
+    ssize_t recv_result = recv(client_socket, recv_buffer, sizeof(recv_buffer), 0);
+
+    if (recv_result == -1)
+    {
+        perror("recv failed");
+        return -1;
+    }
+
+    if (recv_result == 0)
+    {
+        fprintf(stderr, "connection has been closed\n");
+        close(client_socket);
+        return 0;
+    }
+
+    printf("->   *      %ld B\n", recv_result);
+
+    send_request(uc, recv_buffer, recv_result, &upstream_response_handler, client_socket);
+
+    return 1;
+}
+
+int tcp_on_connect(int sfd, void *payload)
+{
+    struct upstream_connection *uc = payload;
     struct sockaddr_in client_addrs[10] = {0};
     size_t len = 0;
 
-    struct pollfd pfds[10] = {0};
-
-    pfds[0].fd = sfd;
-    pfds[0].events = POLLIN;
-
-    size_t npfds = 1;
-
-    while (1)
+    int client_socket;
+    socklen_t client_addrlen = sizeof(client_addrs[0]);
+    if ((client_socket = accept(sfd, (struct sockaddr *)&client_addrs[len], &client_addrlen)) == -1)
     {
-        int ready;
-
-        ready = poll(pfds, npfds, -1);
-
-        printf("%d events happened in poll\n", ready);
-
-        if (ready == -1)
-        {
-            perror("poll failed");
-            exit(EXIT_FAILURE);
-        }
-
-        int i;
-        for (i = 0; i < npfds; i++)
-        {
-            if (ready == 0) {
-                break;
-            }
-
-            if (pfds[i].revents == 0)
-            {
-                continue;
-            }
-
-            printf("fd=%d (%s);\t"
-                "events value: %d,\t"
-                "events: %s%s%s%s\n",
-                pfds[i].fd,
-                i == 0 ? "event on connections listening socket" : "event on connection data socket",
-                pfds[i].revents,
-                (pfds[i].revents & POLLIN) ? "POLLIN " : "",
-                (pfds[i].revents & POLLHUP) ? "POLLHUP " : "",
-                (pfds[i].revents & POLLERR) ? "POLLERR" : "",
-                (pfds[i].revents & POLLNVAL) ? "POLLNVAL" : "");
-
-            if (i == 0 && pfds[i].revents & POLLIN)
-            {
-                int client_socket;
-                socklen_t client_addrlen = sizeof(client_addrs[0]);
-                if ((client_socket = accept(sfd, (struct sockaddr *)&client_addrs[len], &client_addrlen)) == -1)
-                {
-                    perror("accept failed \n");
-                    continue;
-                }
-
-                printf("New connection from ('%s', '%d'), fd=%d\n", inet_ntoa(client_addrs[len].sin_addr), ntohs(client_addrs[len].sin_port), client_socket);
-                pfds[npfds].fd = client_socket;
-                pfds[npfds].events = POLLIN;
-                npfds++;
-                len++;
-                ready--;
-                continue;
-            }
-
-            if (pfds[i].revents & POLLIN)
-            {
-                f(pfds[i].fd, uc);
-            }
-
-            if (pfds[i].revents & POLLNVAL)
-            {
-                printf("closing fd=%d\n", pfds[i].fd);
-                close(pfds[i].fd);
-                pfds[i].fd = -1;
-                // npfds--;
-            }
-
-            ready--;
-        }
+        perror("accept failed \n");
+        return 1;
     }
+
+    struct upstream_connection_request upstream_request = {0};
+    struct event_loop_action *el_action = calloc(1, sizeof(struct event_loop_action));
+    el_action->action = &on_data;
+    el_action->payload = (void *)uc;
+
+    event_loop_add(&event_loop, client_socket, POLLIN, el_action);
+
+    return 0;
 }
 
 int tcp_connect(const char *host, in_port_t port)
@@ -427,43 +545,11 @@ int on_request(int socket, void (*f)(int socket, uint8_t *buf, ssize_t recv_resu
     return 1;
 }
 
-int send_request(struct upstream_connection *uc, uint8_t *request_buffer, ssize_t request_buffer_size, void (*f)(uint8_t *response_buffer, ssize_t response_size, int client_socket), int client_socket)
-{
-    ssize_t upstream_send_result = upstream_connection_send(uc, request_buffer, request_buffer_size);
-
-    if (upstream_send_result == -1)
-    {
-        perror("send to upstream failed");
-        return -1;
-    }
-
-    printf("     * ->   %ld B\n", upstream_send_result);
-
-    upstream_connection_pipe(uc, f, client_socket);
-}
-
-void upstream_response_handler(uint8_t *upstream_response_buffer, ssize_t upstream_response_size, int client_socket)
-{
-    printf("     * <-   %ld B\n", upstream_response_size);
-
-    ssize_t client_send_result = send(client_socket, upstream_response_buffer, upstream_response_size, 0);
-    printf("<-   *      %ld B\n", client_send_result);
-}
-
 void client_request_handler(int client_socket, uint8_t *client_buffer, ssize_t size, struct upstream_connection *uc)
 {
     printf("->   *      %ld B\n", size);
 
     send_request(uc, client_buffer, size, &upstream_response_handler, client_socket);
-}
-
-void on_connect(int client_socket, struct upstream_connection *uc)
-{
-    if (on_request(client_socket, &client_request_handler, uc) == 0)
-    {
-        close(client_socket);
-        // upstream_connection_destroy(uc);
-    };
 }
 
 int main(int argc, char *argv[])
@@ -486,5 +572,10 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    tcp_on_connect(sfd, &on_connect, &u_connection);
+    struct event_loop_action action;
+    action.action = &tcp_on_connect;
+    action.payload = (void *)&u_connection;
+
+    event_loop_add(&event_loop, sfd, POLLIN, &action);
+    event_loop_start(&event_loop);
 }
