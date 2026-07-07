@@ -8,111 +8,11 @@
 #include <unistd.h>
 #include <errno.h>
 #include <poll.h>
+#include "queue.h"
+#include "event_loop.h"
 
 #define CHUNKED_RESPONSE 1;
 #define CONTENT_LENGTH_RESPONSE 2;
-
-struct event_loop_action
-{
-    int (*action)(int fd, void *payload);
-    void *payload;
-};
-
-struct event_loop
-{
-    struct pollfd _pfds[10];
-    size_t _npfds;
-    struct event_loop_action *_actions[10];
-};
-
-struct event_loop event_loop = {0};
-
-int event_loop_init(struct event_loop *el)
-{
-    return 0;
-}
-
-int event_loop_destroy(struct event_loop *el)
-{
-    int i;
-
-    for (i = 0; i < el->_npfds; i++)
-    {
-        close(el->_pfds[i].fd);
-    }
-
-    return 0;
-}
-
-int event_loop_add(struct event_loop *el, int fd, short int events, struct event_loop_action *action)
-{
-    el->_pfds[el->_npfds].fd = fd;
-    el->_pfds[el->_npfds].events = events;
-
-    el->_actions[el->_npfds] = action;
-
-    el->_npfds++;
-
-    return 0;
-}
-
-int event_loop_start(struct event_loop *el)
-{
-    while (1)
-    {
-        int ready;
-
-        ready = poll(el->_pfds, el->_npfds, -1);
-
-        printf("%d events happened in poll\n", ready);
-
-        if (ready == -1)
-        {
-            perror("poll failed");
-            exit(EXIT_FAILURE);
-        }
-
-        int i;
-        for (i = 0; i < el->_npfds; i++)
-        {
-            if (ready == 0)
-            {
-                break;
-            }
-
-            if (el->_pfds[i].revents == 0)
-            {
-                continue;
-            }
-
-            printf("fd=%d (%s);\t"
-                   "events value: %d,\t"
-                   "events: %s%s%s%s\n",
-                   el->_pfds[i].fd,
-                   i == 0 ? "event on connections listening socket" : "event on connection data socket",
-                   el->_pfds[i].revents,
-                   (el->_pfds[i].revents & POLLIN) ? "POLLIN " : "",
-                   (el->_pfds[i].revents & POLLHUP) ? "POLLHUP " : "",
-                   (el->_pfds[i].revents & POLLERR) ? "POLLERR" : "",
-                   (el->_pfds[i].revents & POLLNVAL) ? "POLLNVAL" : "");
-
-            if (el->_pfds[i].revents & el->_pfds[i].events)
-            {
-                el->_actions[i]->action(el->_pfds[i].fd, el->_actions[i]->payload);
-            }
-
-            if (el->_pfds[i].revents & POLLNVAL)
-            {
-                printf("closing fd=%d\n", el->_pfds[i].fd);
-                close(el->_pfds[i].fd);
-                el->_pfds[i].fd = -1;
-                // npfds--;
-            }
-
-            ready--;
-        }
-    }
-}
 
 enum RESPONSE_TYPE
 {
@@ -136,10 +36,17 @@ struct upstream_connection
     int8_t _response[8192];
 };
 
-struct upstream_connection_request
+struct pending_request
 {
+    int is_request_finished;
+    int is_response_finished;
+    int8_t _request[4096];
     int8_t _response[8192];
 };
+
+struct event_loop event_loop = {0};
+
+Queue pending_requests_queue = {0};
 
 int chunked_response_is_complete(char *response, size_t response_size)
 {
@@ -212,6 +119,10 @@ int process_response(char *response_with_headers, size_t response_size, struct r
     }
 }
 
+int on_upstream_data(int upstream_fd, void *payload)
+{
+}
+
 int upstream_connection_create(struct upstream_connection *uc)
 {
     int scon = socket(AF_INET, SOCK_STREAM, 0);
@@ -238,6 +149,12 @@ int upstream_connection_create(struct upstream_connection *uc)
     };
 
     uc->_fd = scon;
+
+    struct event_loop_action *el_action = calloc(1, sizeof(struct event_loop_action));
+    el_action->action = &on_upstream_data;
+    el_action->payload = NULL;
+
+    event_loop_add(&event_loop, scon, POLLIN, el_action);
 
     return 0;
 }
@@ -485,7 +402,6 @@ int tcp_on_connect(int sfd, void *payload)
         return 1;
     }
 
-    struct upstream_connection_request upstream_request = {0};
     struct event_loop_action *el_action = calloc(1, sizeof(struct event_loop_action));
     el_action->action = &on_data;
     el_action->payload = (void *)uc;
@@ -554,6 +470,8 @@ void client_request_handler(int client_socket, uint8_t *client_buffer, ssize_t s
 
 int main(int argc, char *argv[])
 {
+    initializeQueue(&pending_requests_queue);
+
     int sfd;
     if ((sfd = tcp_listen("0.0.0.0", 8082)) == -1)
     {
@@ -579,3 +497,12 @@ int main(int argc, char *argv[])
     event_loop_add(&event_loop, sfd, POLLIN, &action);
     event_loop_start(&event_loop);
 }
+
+// upstream server response is added to el
+
+// client request is received
+// some instance is added to queue
+// upstream socket data notification
+// take first item from queue
+// process response from upstream socket
+// if full response is served, remove item from queue
