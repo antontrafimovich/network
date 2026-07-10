@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <stdio.h>
 #include "event_loop.h"
 
 int event_loop_init(struct event_loop *el)

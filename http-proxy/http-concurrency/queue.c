@@ -4,20 +4,20 @@
 #include "queue.h"
 
 // Function to initialize the queue
-void initializeQueue(Queue *q)
+void initialize_queue(Queue *q)
 {
     q->front = -1;
     q->rear = 0;
 }
 
 // Function to check if the queue is empty
-bool isEmpty(Queue *q)
+bool is_empty(Queue *q)
 {
     return (q->front == q->rear - 1);
 }
 
 // Function to check if the queue is full
-bool isFull(Queue *q)
+bool is_full(Queue *q)
 {
     return (q->rear == MAX_SIZE);
 }
@@ -26,7 +26,7 @@ bool isFull(Queue *q)
 // operation)
 void enqueue(Queue *q, void *value)
 {
-    if (isFull(q))
+    if (is_full(q))
     {
         printf("Queue is full\n");
         return;
@@ -39,7 +39,7 @@ void enqueue(Queue *q, void *value)
 // operation)
 void dequeue(Queue *q)
 {
-    if (isEmpty(q))
+    if (is_empty(q))
     {
         printf("Queue is empty\n");
         return;
@@ -49,30 +49,13 @@ void dequeue(Queue *q)
 
 // Function to get the element at the front of the queue
 // (Peek operation)
-int peek(Queue *q)
+void *peek(Queue *q)
 {
-    if (isEmpty(q))
+    if (is_empty(q))
     {
         printf("Queue is empty\n");
-        return -1; // return some default value or handle
+        return NULL; // return some default value or handle
                    // error differently
     }
     return q->items[q->front + 1];
-}
-
-// Function to print the current queue
-void printQueue(Queue *q)
-{
-    if (isEmpty(q))
-    {
-        printf("Queue is empty\n");
-        return;
-    }
-
-    printf("Current Queue: ");
-    for (int i = q->front + 1; i < q->rear; i++)
-    {
-        printf("%d ", q->items[i]);
-    }
-    printf("\n");
 }

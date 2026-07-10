@@ -11,6 +11,9 @@
 #include "queue.h"
 #include "event_loop.h"
 
+#define HASHTABLE_IMPLEMENTATION
+#include "hashtable.h"
+
 #define CHUNKED_RESPONSE 1;
 #define CONTENT_LENGTH_RESPONSE 2;
 
@@ -38,8 +41,11 @@ struct upstream_connection
 
 struct pending_request
 {
+    int client_socket;
     int is_request_finished;
-    int is_response_finished;
+    ssize_t request_used;
+    ssize_t used;
+    ssize_t headers_used;
     int8_t _request[4096];
     int8_t _response[8192];
 };
@@ -47,6 +53,8 @@ struct pending_request
 struct event_loop event_loop = {0};
 
 Queue pending_requests_queue = {0};
+
+hashtable_t *client_socket_buffers = NULL;
 
 int chunked_response_is_complete(char *response, size_t response_size)
 {
@@ -119,8 +127,63 @@ int process_response(char *response_with_headers, size_t response_size, struct r
     }
 }
 
+void upstream_response_handler(uint8_t *upstream_response_buffer, ssize_t upstream_response_size, int client_socket)
+{
+    printf("     * <-   %ld B\n", upstream_response_size);
+
+    ssize_t client_send_result = send(client_socket, upstream_response_buffer, upstream_response_size, 0);
+    printf("<-   *      %ld B\n", client_send_result);
+}
+
 int on_upstream_data(int upstream_fd, void *payload)
 {
+    struct pending_request *pr = (struct pending_request *)peek(&pending_requests_queue);
+
+    struct response_info response_info = {0};
+    ssize_t used = pr->used, headers_used = pr->headers_used;
+
+    while (1)
+    {
+        ssize_t upstream_recv_result = recv(upstream_fd, pr->_response + headers_used, sizeof(pr->_response) - headers_used, MSG_DONTWAIT);
+
+        if (upstream_recv_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            break;
+        }
+
+        if (response_info.response_type == UNKNOWN || !response_info.response_type)
+        {
+            process_response(pr->_response, upstream_recv_result, &response_info);
+        }
+
+        used += upstream_recv_result;
+
+        upstream_response_handler(pr->_response + headers_used, upstream_recv_result, pr->client_socket);
+
+        if (response_info.response_type == UNKNOWN)
+        {
+
+            headers_used += upstream_recv_result;
+        }
+        else
+        {
+            headers_used = 0;
+        }
+
+        if (response_info.response_type == CHUNKED && chunked_response_is_complete(pr->_response, upstream_recv_result))
+        {
+            dequeue(&pending_requests_queue);
+            printf("chunked response is complete\n");
+            return 0;
+        }
+
+        if (response_info.response_type == CONTENT_LENGTH && used >= response_info.header_size + response_info.response_size)
+        {
+            dequeue(&pending_requests_queue);
+            printf("content length response is complete\n");
+            return 0;
+        }
+    }
 }
 
 int upstream_connection_create(struct upstream_connection *uc)
@@ -167,13 +230,18 @@ int upstream_connection_destroy(struct upstream_connection *uc)
 
 int upstream_connection_send(struct upstream_connection *uc, uint8_t *request_buffer, ssize_t request_buffer_size)
 {
-    ssize_t sent = 0;
+    ssize_t upstream_send_result;
 
-    while (sent < request_buffer_size)
+    while (1)
     {
         printf("Sending request to upstream socket=%d\n", uc->_fd);
 
-        ssize_t upstream_send_result = send(uc->_fd, request_buffer, request_buffer_size, 0);
+        upstream_send_result = send(uc->_fd, request_buffer, request_buffer_size, MSG_DONTWAIT);
+
+        if (upstream_send_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            return 0;
+        }
 
         if (upstream_send_result == -1)
         {
@@ -181,68 +249,11 @@ int upstream_connection_send(struct upstream_connection *uc, uint8_t *request_bu
             upstream_connection_destroy(uc);
             upstream_connection_create(uc);
             printf("Connection was recreated, new fd=%d\n", uc->_fd);
-            sent = 0;
             continue;
         }
 
-        sent += upstream_send_result;
-
         printf("     * ->   %ld B\n", upstream_send_result);
         return upstream_send_result;
-    }
-}
-
-struct upstream_connection_pipe_payload
-{
-    void (*cb)(uint8_t *response_buffer, ssize_t response_size, int client_socket);
-    struct upstream_connection *uc;
-    int client_socket;
-};
-
-int upstream_connection_pipe(int upstream_socket, void *payload)
-{
-    struct upstream_connection_pipe_payload *ucp_payload = payload;
-    int client_socket = ucp_payload->client_socket;
-    void (*cb)(uint8_t *response_buffer, ssize_t response_size, int client_socket) = ucp_payload->cb;
-    struct upstream_connection *uc = ucp_payload->uc;
-
-    struct response_info response_info = {0};
-    ssize_t used = 0, headers_used = 0;
-
-    while (1)
-    {
-        ssize_t upstream_recv_result = recv(uc->_fd, uc->_response + headers_used, sizeof(uc->_response) - headers_used, 0);
-
-        if (response_info.response_type == UNKNOWN || !response_info.response_type)
-        {
-            process_response(uc->_response, upstream_recv_result, &response_info);
-        }
-
-        used += upstream_recv_result;
-
-        cb(uc->_response + headers_used, upstream_recv_result, client_socket);
-
-        if (response_info.response_type == UNKNOWN)
-        {
-
-            headers_used += upstream_recv_result;
-        }
-        else
-        {
-            headers_used = 0;
-        }
-
-        if (response_info.response_type == CHUNKED && chunked_response_is_complete(uc->_response, upstream_recv_result))
-        {
-            printf("chunked response is complete\n");
-            return 0;
-        }
-
-        if (response_info.response_type == CONTENT_LENGTH && used >= response_info.header_size + response_info.response_size)
-        {
-            printf("content length response is complete\n");
-            return 0;
-        }
     }
 }
 
@@ -340,50 +351,75 @@ int send_request(struct upstream_connection *uc, uint8_t *request_buffer, ssize_
         return -1;
     }
 
-    struct upstream_connection_pipe_payload *ucp_payload = calloc(1, sizeof(struct upstream_connection_pipe_payload));
-    ucp_payload->cb = f;
-    ucp_payload->client_socket = client_socket;
-    ucp_payload->uc = uc;
-
-    struct event_loop_action *el_action = calloc(1, sizeof(struct event_loop_action));
-    el_action->action = &upstream_connection_pipe;
-    el_action->payload = (void *)ucp_payload;
-
-    event_loop_add(&event_loop, uc->_fd, POLLIN, el_action);
     return 1;
 }
 
-void upstream_response_handler(uint8_t *upstream_response_buffer, ssize_t upstream_response_size, int client_socket)
+int handle_queue(struct upstream_connection *uc)
 {
-    printf("     * <-   %ld B\n", upstream_response_size);
+    struct pending_request *first = peek(&pending_requests_queue);
 
-    ssize_t client_send_result = send(client_socket, upstream_response_buffer, upstream_response_size, 0);
-    printf("<-   *      %ld B\n", client_send_result);
+    while (1)
+    {
+        ssize_t upstream_send_result = upstream_connection_send(uc, first->_request, first->request_used);
+
+        if (upstream_send_result == -1)
+        {
+            perror("send to upstream failed");
+            return -1;
+        }
+
+        return 1;
+    }
 }
 
-int on_data(int client_socket, void *payload)
+int on_client_data(int client_socket, void *payload)
 {
+
+    hashtable_entry_t *data = hashtable_get(client_socket_buffers, &client_socket, sizeof(client_socket));
+
+    struct pending_request *pr = (struct pending_request *)(data->val.data);
+
     struct upstream_connection *uc = payload;
-    uint8_t recv_buffer[4096];
 
-    ssize_t recv_result = recv(client_socket, recv_buffer, sizeof(recv_buffer), 0);
-
-    if (recv_result == -1)
+    while (1)
     {
-        perror("recv failed");
-        return -1;
+        if (pr->is_request_finished)
+        {
+            break;
+        }
+
+        ssize_t recv_result = recv(client_socket, pr->_request + pr->request_used, sizeof(pr->_request) - pr->request_used, MSG_DONTWAIT);
+
+        if (request_is_complete(pr->_request))
+        {
+            pr->request_used += recv_result;
+            pr->is_request_finished = 1;
+            enqueue(&pending_requests_queue, pr);
+            break;
+        }
+
+        if (recv_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            handle_queue(uc);
+            break;
+        }
+
+        if (recv_result == 0)
+        {
+            fprintf(stderr, "connection has been closed\n");
+            close(client_socket);
+            return 0;
+        }
+
+        pr->request_used += recv_result;
+
+        printf("->   *      %ld B\n", recv_result);
+
+        // if (client_socket == pr->client_socket)
+        // {
+        //     send_request(uc, recv_buffer, recv_result, &upstream_response_handler, client_socket);
+        // }
     }
-
-    if (recv_result == 0)
-    {
-        fprintf(stderr, "connection has been closed\n");
-        close(client_socket);
-        return 0;
-    }
-
-    printf("->   *      %ld B\n", recv_result);
-
-    send_request(uc, recv_buffer, recv_result, &upstream_response_handler, client_socket);
 
     return 1;
 }
@@ -402,8 +438,23 @@ int tcp_on_connect(int sfd, void *payload)
         return 1;
     }
 
+    struct pending_request *pr = calloc(sizeof(struct pending_request), 1);
+    pr->client_socket = client_socket;
+
+    hashtable_kv_t *key_value = calloc(sizeof(hashtable_kv_t), 2);
+
+    key_value[0].data = &client_socket;
+    key_value[0].bytes = sizeof(client_socket);
+
+    key_value[1].data = pr;
+    key_value[1].bytes = sizeof(sizeof(hashtable_kv_t));
+
+    hashtable_put(client_socket_buffers, key_value, key_value + 1);
+
+    // enqueue(&pending_requests_queue, pr);
+
     struct event_loop_action *el_action = calloc(1, sizeof(struct event_loop_action));
-    el_action->action = &on_data;
+    el_action->action = &on_client_data;
     el_action->payload = (void *)uc;
 
     event_loop_add(&event_loop, client_socket, POLLIN, el_action);
@@ -424,11 +475,10 @@ int tcp_connect(const char *host, in_port_t port)
         return -1;
     }
 
-    struct sockaddr_in addr =
-        {
-            AF_INET,
-            htons(port),
-            in_addr};
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr = in_addr;
 
     if (connect(scon, (struct sockaddr *)&addr, sizeof(addr)) != 0)
     {
@@ -437,28 +487,6 @@ int tcp_connect(const char *host, in_port_t port)
     };
 
     return scon;
-}
-
-int on_request(int socket, void (*f)(int socket, uint8_t *buf, ssize_t recv_result, struct upstream_connection *), struct upstream_connection *uc)
-{
-    uint8_t recv_buffer[4096];
-
-    ssize_t recv_result = recv(socket, recv_buffer, sizeof(recv_buffer), 0);
-
-    if (recv_result == -1)
-    {
-        perror("recv failed");
-        return -1;
-    }
-
-    if (recv_result == 0)
-    {
-        fprintf(stderr, "connection has been closed\n");
-        return 0;
-    }
-
-    f(socket, recv_buffer, recv_result, uc);
-    return 1;
 }
 
 void client_request_handler(int client_socket, uint8_t *client_buffer, ssize_t size, struct upstream_connection *uc)
@@ -470,7 +498,9 @@ void client_request_handler(int client_socket, uint8_t *client_buffer, ssize_t s
 
 int main(int argc, char *argv[])
 {
-    initializeQueue(&pending_requests_queue);
+    initialize_queue(&pending_requests_queue);
+
+    client_socket_buffers = hashtable_create(16);
 
     int sfd;
     if ((sfd = tcp_listen("0.0.0.0", 8082)) == -1)
@@ -499,6 +529,16 @@ int main(int argc, char *argv[])
 }
 
 // upstream server response is added to el
+
+// client connection is created
+// for each client connection buffer is created
+// when data comes on client socket, add it to buffer untill request is complete
+// once request is complete, add it to the pending_requests queue
+
+// go over queue
+// if item in queue, send request to upstream
+// get response from upstream
+// if response is complete, remove item from the queue
 
 // client request is received
 // some instance is added to queue
