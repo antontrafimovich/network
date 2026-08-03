@@ -43,11 +43,12 @@ struct pending_request
 {
     int client_socket;
     int is_request_finished;
+    ssize_t sent;
+    int8_t request[4096];
     ssize_t request_used;
-    ssize_t used;
-    ssize_t headers_used;
-    int8_t _request[4096];
-    int8_t _response[8192];
+    int8_t response[8192];
+    ssize_t response_used;
+    ssize_t response_headers_used;
 };
 
 struct event_loop event_loop = {0};
@@ -132,6 +133,7 @@ void upstream_response_handler(uint8_t *upstream_response_buffer, ssize_t upstre
     printf("     * <-   %ld B\n", upstream_response_size);
 
     ssize_t client_send_result = send(client_socket, upstream_response_buffer, upstream_response_size, 0);
+
     printf("<-   *      %ld B\n", client_send_result);
 }
 
@@ -139,12 +141,16 @@ int on_upstream_data(int upstream_fd, void *payload)
 {
     struct pending_request *pr = (struct pending_request *)peek(&pending_requests_queue);
 
+    if (pr == NULL)
+    {
+        return 1;
+    }
+
     struct response_info response_info = {0};
-    ssize_t used = pr->used, headers_used = pr->headers_used;
 
     while (1)
     {
-        ssize_t upstream_recv_result = recv(upstream_fd, pr->_response + headers_used, sizeof(pr->_response) - headers_used, MSG_DONTWAIT);
+        ssize_t upstream_recv_result = recv(upstream_fd, pr->response + pr->response_headers_used, sizeof(pr->response) - pr->response_headers_used, MSG_DONTWAIT);
 
         if (upstream_recv_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
@@ -153,32 +159,30 @@ int on_upstream_data(int upstream_fd, void *payload)
 
         if (response_info.response_type == UNKNOWN || !response_info.response_type)
         {
-            process_response(pr->_response, upstream_recv_result, &response_info);
+            process_response(pr->response, upstream_recv_result, &response_info);
         }
 
-        used += upstream_recv_result;
+        pr->response_used += upstream_recv_result;
 
-        upstream_response_handler(pr->_response + headers_used, upstream_recv_result, pr->client_socket);
+        upstream_response_handler(pr->response + pr->response_headers_used, upstream_recv_result, pr->client_socket);
 
         if (response_info.response_type == UNKNOWN)
         {
 
-            headers_used += upstream_recv_result;
-        }
-        else
-        {
-            headers_used = 0;
+            pr->response_headers_used += upstream_recv_result;
         }
 
-        if (response_info.response_type == CHUNKED && chunked_response_is_complete(pr->_response, upstream_recv_result))
+        if (response_info.response_type == CHUNKED && chunked_response_is_complete(pr->response, upstream_recv_result))
         {
+            pr->response_headers_used = 0;
             dequeue(&pending_requests_queue);
             printf("chunked response is complete\n");
             return 0;
         }
 
-        if (response_info.response_type == CONTENT_LENGTH && used >= response_info.header_size + response_info.response_size)
+        if (response_info.response_type == CONTENT_LENGTH && pr->response_used >= response_info.header_size + response_info.response_size)
         {
+            pr->response_headers_used = 0;
             dequeue(&pending_requests_queue);
             printf("content length response is complete\n");
             return 0;
@@ -240,7 +244,7 @@ int upstream_connection_send(struct upstream_connection *uc, uint8_t *request_bu
 
         if (upstream_send_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
-            return 0;
+            return -1;
         }
 
         if (upstream_send_result == -1)
@@ -341,35 +345,30 @@ int tcp_listen(const char *host, in_port_t port)
     return sfd;
 }
 
-int send_request(struct upstream_connection *uc, uint8_t *request_buffer, ssize_t request_buffer_size, void (*f)(uint8_t *response_buffer, ssize_t response_size, int client_socket), int client_socket)
-{
-    ssize_t upstream_send_result = upstream_connection_send(uc, request_buffer, request_buffer_size);
-
-    if (upstream_send_result == -1)
-    {
-        perror("send to upstream failed");
-        return -1;
-    }
-
-    return 1;
-}
-
 int handle_queue(struct upstream_connection *uc)
 {
     struct pending_request *first = peek(&pending_requests_queue);
 
-    while (1)
+    if (first == NULL)
     {
-        ssize_t upstream_send_result = upstream_connection_send(uc, first->_request, first->request_used);
+        return 1;
+    }
 
-        if (upstream_send_result == -1)
+    while (first->sent < first->request_used)
+    {
+        ssize_t upstream_send_result = upstream_connection_send(uc, first->request + first->sent, first->request_used - first->sent);
+
+        if (upstream_send_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
-            perror("send to upstream failed");
             return -1;
         }
 
-        return 1;
+        first->sent += upstream_send_result;
     }
+
+    first->is_request_finished = 0;
+
+    return 1;
 }
 
 int on_client_data(int client_socket, void *payload)
@@ -388,15 +387,7 @@ int on_client_data(int client_socket, void *payload)
             break;
         }
 
-        ssize_t recv_result = recv(client_socket, pr->_request + pr->request_used, sizeof(pr->_request) - pr->request_used, MSG_DONTWAIT);
-
-        if (request_is_complete(pr->_request))
-        {
-            pr->request_used += recv_result;
-            pr->is_request_finished = 1;
-            enqueue(&pending_requests_queue, pr);
-            break;
-        }
+        ssize_t recv_result = recv(client_socket, pr->request + pr->request_used, sizeof(pr->request) - pr->request_used, MSG_DONTWAIT);
 
         if (recv_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
@@ -404,27 +395,31 @@ int on_client_data(int client_socket, void *payload)
             break;
         }
 
+        pr->request_used += recv_result;
+
+        if (request_is_complete(pr->request))
+        {
+            pr->is_request_finished = 1;
+            enqueue(&pending_requests_queue, pr);
+            handle_queue(uc);
+            break;
+        }
+
         if (recv_result == 0)
         {
             fprintf(stderr, "connection has been closed\n");
+            hashtable_remove(client_socket_buffers, &client_socket, sizeof(client_socket));
             close(client_socket);
             return 0;
         }
 
-        pr->request_used += recv_result;
-
         printf("->   *      %ld B\n", recv_result);
-
-        // if (client_socket == pr->client_socket)
-        // {
-        //     send_request(uc, recv_buffer, recv_result, &upstream_response_handler, client_socket);
-        // }
     }
 
     return 1;
 }
 
-int tcp_on_connect(int sfd, void *payload)
+int on_connect(int sfd, void *payload)
 {
     struct upstream_connection *uc = payload;
     struct sockaddr_in client_addrs[10] = {0};
@@ -438,16 +433,16 @@ int tcp_on_connect(int sfd, void *payload)
         return 1;
     }
 
-    struct pending_request *pr = calloc(sizeof(struct pending_request), 1);
+    struct pending_request *pr = calloc(1, sizeof(struct pending_request));
     pr->client_socket = client_socket;
 
-    hashtable_kv_t *key_value = calloc(sizeof(hashtable_kv_t), 2);
+    hashtable_kv_t *key_value = calloc(2, sizeof(hashtable_kv_t));
 
     key_value[0].data = &client_socket;
     key_value[0].bytes = sizeof(client_socket);
 
     key_value[1].data = pr;
-    key_value[1].bytes = sizeof(sizeof(hashtable_kv_t));
+    key_value[1].bytes = sizeof(struct pending_request);
 
     hashtable_put(client_socket_buffers, key_value, key_value + 1);
 
@@ -460,40 +455,6 @@ int tcp_on_connect(int sfd, void *payload)
     event_loop_add(&event_loop, client_socket, POLLIN, el_action);
 
     return 0;
-}
-
-int tcp_connect(const char *host, in_port_t port)
-{
-    int scon = socket(AF_INET, SOCK_STREAM, 0);
-
-    struct in_addr in_addr;
-
-    if (inet_pton(AF_INET, host, &in_addr) < 1)
-    {
-        perror("inet_pton failed");
-        printf("Error: %s\n", strerror(errno));
-        return -1;
-    }
-
-    struct sockaddr_in addr = {0};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    addr.sin_addr = in_addr;
-
-    if (connect(scon, (struct sockaddr *)&addr, sizeof(addr)) != 0)
-    {
-        perror("connect failed");
-        return -1;
-    };
-
-    return scon;
-}
-
-void client_request_handler(int client_socket, uint8_t *client_buffer, ssize_t size, struct upstream_connection *uc)
-{
-    printf("->   *      %ld B\n", size);
-
-    send_request(uc, client_buffer, size, &upstream_response_handler, client_socket);
 }
 
 int main(int argc, char *argv[])
@@ -521,7 +482,7 @@ int main(int argc, char *argv[])
     }
 
     struct event_loop_action action;
-    action.action = &tcp_on_connect;
+    action.action = &on_connect;
     action.payload = (void *)&u_connection;
 
     event_loop_add(&event_loop, sfd, POLLIN, &action);
