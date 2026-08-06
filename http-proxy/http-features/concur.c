@@ -1,0 +1,529 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <netinet/ip.h>
+#include <arpa/inet.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
+#include <poll.h>
+#include "queue.h"
+#include "event_loop.h"
+
+#define HASHTABLE_IMPLEMENTATION
+#include "hashtable.h"
+
+#define CHUNKED_RESPONSE 1;
+#define CONTENT_LENGTH_RESPONSE 2;
+
+enum RESPONSE_TYPE
+{
+    UNKNOWN = -1,
+    CHUNKED = 1,
+    CONTENT_LENGTH = 2
+};
+
+struct response_info
+{
+    enum RESPONSE_TYPE response_type;
+    size_t response_size;
+    size_t header_size;
+};
+
+struct upstream_connection
+{
+    char *host;
+    in_port_t port;
+    int _fd;
+    int8_t _response[8192];
+};
+
+struct pending_request
+{
+    int client_socket;
+    int is_request_finished;
+    ssize_t sent;
+    int8_t request[4096];
+    ssize_t request_used;
+    int8_t response[8192];
+    ssize_t response_used;
+    ssize_t response_headers_used;
+    struct response_info response_info;
+};
+
+int on_upstream_data(int upstream_fd, void *payload);
+
+struct event_loop event_loop = {0};
+
+Queue pending_requests_queue = {0};
+
+hashtable_t *client_socket_buffers = NULL;
+
+int chunked_response_is_complete(char *response, size_t response_size)
+{
+    return response[response_size - 1] == '\n' && response[response_size - 2] == '\r' && response[response_size - 3] == '\n' && response[response_size - 4] == '\r' && response[response_size - 5] == '0';
+}
+
+int process_response(char *response_with_headers, size_t response_size, struct response_info *response_info)
+{
+    int i;
+    char header_name[128], header_value[512];
+    size_t header_name_i = 0;
+    size_t header_value_i = 0;
+    unsigned char header_name_is_done = 0;
+    response_info->response_type = UNKNOWN;
+
+    for (i = 0; i < response_size; i++)
+    {
+        if (response_with_headers[i] == ':')
+        {
+            header_name[header_name_i] = '\0';
+            header_name_is_done = 1;
+            if (strncmp("Content-Length", header_name, header_name_i - 1) == 0)
+            {
+                response_info->response_type = CONTENT_LENGTH;
+                continue;
+            }
+
+            if (strncmp("Transfer-Encoding", header_name, header_name_i - 1) == 0)
+            {
+                response_info->response_type = CHUNKED;
+                response_info->response_size = 0;
+                continue;
+            }
+        }
+
+        if (response_with_headers[i] == '\r' && response_with_headers[++i] == '\n')
+        {
+            // end of header section
+            if (header_name_i == 0 && header_value_i == 0)
+            {
+                response_info->header_size = i + 1;
+                return 0;
+            }
+
+            if (response_info->response_type == CONTENT_LENGTH && response_info->response_size == 0)
+            {
+                header_value[header_value_i] = '\0';
+                response_info->response_size = atoi(header_value);
+            }
+
+            header_value_i = 0;
+            header_name_i = 0;
+            header_name_is_done = 0;
+
+            continue;
+        }
+
+        if (header_name_is_done)
+        {
+            if (response_info->response_type == UNKNOWN)
+            {
+                continue;
+            }
+            header_value[header_value_i++] = response_with_headers[i];
+        }
+        else
+        {
+            header_name[header_name_i++] = response_with_headers[i];
+        }
+    }
+}
+
+void upstream_response_handler(uint8_t *upstream_response_buffer, ssize_t upstream_response_size, int client_socket)
+{
+    printf("     * <-   %ld B\n", upstream_response_size);
+
+    ssize_t client_send_result = send(client_socket, upstream_response_buffer, upstream_response_size, 0);
+
+    printf("<-   *      %ld B\n", client_send_result);
+}
+
+int upstream_connection_create(struct upstream_connection *uc)
+{
+    int scon = socket(AF_INET, SOCK_STREAM, 0);
+
+    struct in_addr in_addr;
+
+    if (inet_pton(AF_INET, uc->host, &in_addr) < 1)
+    {
+        perror("inet_pton failed");
+        printf("Error: %s\n", strerror(errno));
+        return -1;
+    }
+
+    struct sockaddr_in addr =
+        {
+            AF_INET,
+            htons(uc->port),
+            in_addr};
+
+    if (connect(scon, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+    {
+        perror("connect failed");
+        return -1;
+    };
+
+    uc->_fd = scon;
+
+    struct event_loop_action *el_action = calloc(1, sizeof(struct event_loop_action));
+    el_action->action = &on_upstream_data;
+    el_action->payload = uc;
+
+    event_loop_add(&event_loop, scon, POLLIN, el_action);
+
+    return 0;
+}
+
+int upstream_connection_destroy(struct upstream_connection *uc)
+{
+    close(uc->_fd);
+    return 0;
+}
+
+int upstream_connection_send(struct upstream_connection *uc, uint8_t *request_buffer, ssize_t request_buffer_size)
+{
+    ssize_t upstream_send_result;
+
+    while (1)
+    {
+        printf("Sending request to upstream socket=%d\n", uc->_fd);
+
+        upstream_send_result = send(uc->_fd, request_buffer, request_buffer_size, MSG_DONTWAIT);
+
+        if (upstream_send_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            return -1;
+        }
+
+        if (upstream_send_result == -1)
+        {
+            perror("Send to upstream failed");
+            upstream_connection_destroy(uc);
+            upstream_connection_create(uc);
+            printf("Connection was recreated, new fd=%d\n", uc->_fd);
+            continue;
+        }
+
+        printf("     * ->   %ld B\n", upstream_send_result);
+        return upstream_send_result;
+    }
+}
+
+int handle_queue(struct upstream_connection *uc)
+{
+    struct pending_request *first = peek(&pending_requests_queue);
+
+    if (first == NULL)
+    {
+        return 1;
+    }
+
+    while (first->sent < first->request_used)
+    {
+        ssize_t upstream_send_result = upstream_connection_send(uc, first->request + first->sent, first->request_used - first->sent);
+
+        if (upstream_send_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            return -1;
+        }
+
+        first->sent += upstream_send_result;
+    }
+
+    first->is_request_finished = 0;
+    first->request_used = 0;
+
+    return 1;
+}
+
+int on_upstream_data(int upstream_fd, void *payload)
+{
+    struct pending_request *pr = (struct pending_request *)peek(&pending_requests_queue);
+    struct upstream_connection *uc = payload;
+
+    if (pr == NULL)
+    {
+        return 1;
+    }
+
+    while (1)
+    {
+        ssize_t upstream_recv_result = recv(upstream_fd, pr->response + pr->response_headers_used, sizeof(pr->response) - pr->response_headers_used, MSG_DONTWAIT);
+
+        if (upstream_recv_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            break;
+        }
+
+        if (upstream_recv_result == 0) {
+            printf("response headers used %ld\n", pr->response_headers_used);
+        }
+
+        if (pr->response_info.response_type == UNKNOWN || !pr->response_info.response_type)
+        {
+            process_response(pr->response, upstream_recv_result, &(pr->response_info));
+        }
+
+        pr->response_used += upstream_recv_result;
+
+        upstream_response_handler(pr->response + pr->response_headers_used, upstream_recv_result, pr->client_socket);
+
+        if (pr->response_info.response_type == UNKNOWN)
+        {
+
+            pr->response_headers_used += upstream_recv_result;
+        }
+        else
+        {
+            pr->response_headers_used = 0;
+        }
+
+        if (pr->response_info.response_type == CHUNKED && chunked_response_is_complete(pr->response, upstream_recv_result))
+        {
+            pr->response_used = 0;
+            pr->sent = 0;
+            pr->response_info.response_size = 0;
+            pr->response_info.header_size = 0;
+            pr->response_info.response_type = -1;
+            dequeue(&pending_requests_queue);
+            handle_queue(uc);
+            printf("chunked response is complete\n");
+            return 0;
+        }
+
+        if (pr->response_info.response_type == CONTENT_LENGTH && pr->response_used >= pr->response_info.header_size + pr->response_info.response_size)
+        {
+            pr->response_used = 0;
+            pr->sent = 0;
+            pr->response_info.response_size = 0;
+            pr->response_info.header_size = 0;
+            pr->response_info.response_type = -1;
+            dequeue(&pending_requests_queue);
+            handle_queue(uc);
+            printf("content length response is complete\n");
+            return 0;
+        }
+    }
+}
+
+int request_is_complete(char *buf, ssize_t request_size)
+{
+    return buf[request_size - 1] == '\n' && buf[request_size - 2] == '\r' && buf[request_size - 3] == '\n' && buf[request_size - 4] == '\r';
+}
+
+int content_length_response_is_complete(char *response, size_t response_size)
+{
+    return CHUNKED;
+}
+
+int response_is_complete(char *response, size_t response_size)
+{
+    unsigned char is_chunked;
+
+    // logic for is chunked response analyze
+    int i;
+    char header_name[128];
+    size_t header_name_i = 0;
+    unsigned char header_name_is_done = 0;
+
+    for (i = 0; i < response_size; i++)
+    {
+        if (response[i] == ':')
+        {
+            header_name[header_name_i] = '\0';
+            continue;
+        }
+
+        header_name[header_name_i++] = response[i];
+    }
+
+    if (is_chunked)
+    {
+        return chunked_response_is_complete(response, response_size);
+    }
+
+    return content_length_response_is_complete(response, response_size);
+}
+
+int tcp_listen(const char *host, in_port_t port)
+{
+    int sfd;
+
+    if ((sfd = socket(AF_INET, SOCK_STREAM, 0)) == -1)
+    {
+        perror("socket failed");
+        return -1;
+    }
+
+    int opt = 1;
+    setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct in_addr in_addr;
+
+    if (inet_pton(AF_INET, host, &in_addr) < 1)
+    {
+        perror("inet_pton failed");
+        return -1;
+    }
+
+    struct sockaddr_in addr =
+        {
+            AF_INET,
+            htons(port),
+            in_addr};
+
+    if (bind(sfd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+    {
+        perror("bind failed");
+        return -1;
+    }
+
+    if (listen(sfd, 1024) != 0)
+    {
+        perror("listen failed");
+        return -1;
+    }
+
+    printf("Server is listening on port %d\n", port);
+
+    return sfd;
+}
+
+int on_client_data(int client_socket, void *payload)
+{
+
+    hashtable_entry_t *data = hashtable_get(client_socket_buffers, &client_socket, sizeof(client_socket));
+
+    struct pending_request *pr = (struct pending_request *)(data->val.data);
+
+    struct upstream_connection *uc = payload;
+
+    while (1)
+    {
+        if (pr->is_request_finished)
+        {
+            break;
+        }
+
+        ssize_t recv_result = recv(client_socket, pr->request + pr->request_used, sizeof(pr->request) - pr->request_used, MSG_DONTWAIT);
+
+        if (recv_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            handle_queue(uc);
+            break;
+        }
+
+        pr->request_used += recv_result;
+
+        printf("->   *      %ld B\n", recv_result);
+
+        if (request_is_complete(pr->request, pr->request_used))
+        {
+            pr->is_request_finished = 1;
+            enqueue(&pending_requests_queue, pr);
+            handle_queue(uc);
+            break;
+        }
+
+        if (recv_result == 0)
+        {
+            fprintf(stderr, "connection has been closed\n");
+            hashtable_remove(client_socket_buffers, &client_socket, sizeof(client_socket));
+            close(client_socket);
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+int on_connect(int sfd, void *payload)
+{
+    struct upstream_connection *uc = payload;
+    struct sockaddr_in client_addrs[10] = {0};
+    size_t len = 0;
+
+    int client_socket;
+    socklen_t client_addrlen = sizeof(client_addrs[0]);
+    if ((client_socket = accept(sfd, (struct sockaddr *)&client_addrs[len], &client_addrlen)) == -1)
+    {
+        perror("accept failed \n");
+        return 1;
+    }
+
+    struct pending_request *pr = calloc(1, sizeof(struct pending_request));
+    pr->client_socket = client_socket;
+
+    hashtable_kv_t *key_value = calloc(2, sizeof(hashtable_kv_t));
+
+    key_value[0].data = &client_socket;
+    key_value[0].bytes = sizeof(client_socket);
+
+    key_value[1].data = pr;
+    key_value[1].bytes = sizeof(struct pending_request);
+
+    hashtable_put(client_socket_buffers, key_value, key_value + 1);
+
+    // enqueue(&pending_requests_queue, pr);
+
+    struct event_loop_action *el_action = calloc(1, sizeof(struct event_loop_action));
+    el_action->action = &on_client_data;
+    el_action->payload = (void *)uc;
+
+    event_loop_add(&event_loop, client_socket, POLLIN, el_action);
+
+    return 0;
+}
+
+int main(int argc, char *argv[])
+{
+    initialize_queue(&pending_requests_queue);
+
+    client_socket_buffers = hashtable_create(16);
+
+    int sfd;
+    if ((sfd = tcp_listen("0.0.0.0", 8082)) == -1)
+    {
+        fprintf(stderr, "failed to listen on 0.0.0.0:8082\n");
+        return 1;
+    }
+
+    struct upstream_connection u_connection = {0};
+
+    u_connection.host = "127.0.0.1";
+    u_connection.port = 8081;
+
+    if (upstream_connection_create(&u_connection) < 0)
+    {
+        perror("Failed to create upstream server connection");
+        return 1;
+    }
+
+    struct event_loop_action action;
+    action.action = &on_connect;
+    action.payload = (void *)&u_connection;
+
+    event_loop_add(&event_loop, sfd, POLLIN, &action);
+    event_loop_start(&event_loop);
+}
+
+// upstream server response is added to el
+
+// client connection is created
+// for each client connection buffer is created
+// when data comes on client socket, add it to buffer untill request is complete
+// once request is complete, add it to the pending_requests queue
+
+// go over queue
+// if item in queue, send request to upstream
+// get response from upstream
+// if response is complete, remove item from the queue
+
+// client request is received
+// some instance is added to queue
+// upstream socket data notification
+// take first item from queue
+// process response from upstream socket
+// if full response is served, remove item from queue
