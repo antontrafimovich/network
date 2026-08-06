@@ -49,7 +49,10 @@ struct pending_request
     int8_t response[8192];
     ssize_t response_used;
     ssize_t response_headers_used;
+    struct response_info response_info;
 };
+
+int on_upstream_data(int upstream_fd, void *payload);
 
 struct event_loop event_loop = {0};
 
@@ -137,59 +140,6 @@ void upstream_response_handler(uint8_t *upstream_response_buffer, ssize_t upstre
     printf("<-   *      %ld B\n", client_send_result);
 }
 
-int on_upstream_data(int upstream_fd, void *payload)
-{
-    struct pending_request *pr = (struct pending_request *)peek(&pending_requests_queue);
-
-    if (pr == NULL)
-    {
-        return 1;
-    }
-
-    struct response_info response_info = {0};
-
-    while (1)
-    {
-        ssize_t upstream_recv_result = recv(upstream_fd, pr->response + pr->response_headers_used, sizeof(pr->response) - pr->response_headers_used, MSG_DONTWAIT);
-
-        if (upstream_recv_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
-        {
-            break;
-        }
-
-        if (response_info.response_type == UNKNOWN || !response_info.response_type)
-        {
-            process_response(pr->response, upstream_recv_result, &response_info);
-        }
-
-        pr->response_used += upstream_recv_result;
-
-        upstream_response_handler(pr->response + pr->response_headers_used, upstream_recv_result, pr->client_socket);
-
-        if (response_info.response_type == UNKNOWN)
-        {
-
-            pr->response_headers_used += upstream_recv_result;
-        }
-
-        if (response_info.response_type == CHUNKED && chunked_response_is_complete(pr->response, upstream_recv_result))
-        {
-            pr->response_headers_used = 0;
-            dequeue(&pending_requests_queue);
-            printf("chunked response is complete\n");
-            return 0;
-        }
-
-        if (response_info.response_type == CONTENT_LENGTH && pr->response_used >= response_info.header_size + response_info.response_size)
-        {
-            pr->response_headers_used = 0;
-            dequeue(&pending_requests_queue);
-            printf("content length response is complete\n");
-            return 0;
-        }
-    }
-}
-
 int upstream_connection_create(struct upstream_connection *uc)
 {
     int scon = socket(AF_INET, SOCK_STREAM, 0);
@@ -219,7 +169,7 @@ int upstream_connection_create(struct upstream_connection *uc)
 
     struct event_loop_action *el_action = calloc(1, sizeof(struct event_loop_action));
     el_action->action = &on_upstream_data;
-    el_action->payload = NULL;
+    el_action->payload = uc;
 
     event_loop_add(&event_loop, scon, POLLIN, el_action);
 
@@ -261,9 +211,106 @@ int upstream_connection_send(struct upstream_connection *uc, uint8_t *request_bu
     }
 }
 
-int request_is_complete(char *buf)
+int handle_queue(struct upstream_connection *uc)
 {
-    return strstr(buf, "\r\n\r\n") != NULL;
+    struct pending_request *first = peek(&pending_requests_queue);
+
+    if (first == NULL)
+    {
+        return 1;
+    }
+
+    while (first->sent < first->request_used)
+    {
+        ssize_t upstream_send_result = upstream_connection_send(uc, first->request + first->sent, first->request_used - first->sent);
+
+        if (upstream_send_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            return -1;
+        }
+
+        first->sent += upstream_send_result;
+    }
+
+    first->is_request_finished = 0;
+    first->request_used = 0;
+
+    return 1;
+}
+
+int on_upstream_data(int upstream_fd, void *payload)
+{
+    struct pending_request *pr = (struct pending_request *)peek(&pending_requests_queue);
+    struct upstream_connection *uc = payload;
+
+    if (pr == NULL)
+    {
+        return 1;
+    }
+
+    while (1)
+    {
+        ssize_t upstream_recv_result = recv(upstream_fd, pr->response + pr->response_headers_used, sizeof(pr->response) - pr->response_headers_used, MSG_DONTWAIT);
+
+        if (upstream_recv_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            break;
+        }
+
+        if (upstream_recv_result == 0) {
+            printf("response headers used %ld\n", pr->response_headers_used);
+        }
+
+        if (pr->response_info.response_type == UNKNOWN || !pr->response_info.response_type)
+        {
+            process_response(pr->response, upstream_recv_result, &(pr->response_info));
+        }
+
+        pr->response_used += upstream_recv_result;
+
+        upstream_response_handler(pr->response + pr->response_headers_used, upstream_recv_result, pr->client_socket);
+
+        if (pr->response_info.response_type == UNKNOWN)
+        {
+
+            pr->response_headers_used += upstream_recv_result;
+        }
+        else
+        {
+            pr->response_headers_used = 0;
+        }
+
+        if (pr->response_info.response_type == CHUNKED && chunked_response_is_complete(pr->response, upstream_recv_result))
+        {
+            pr->response_used = 0;
+            pr->sent = 0;
+            pr->response_info.response_size = 0;
+            pr->response_info.header_size = 0;
+            pr->response_info.response_type = -1;
+            dequeue(&pending_requests_queue);
+            handle_queue(uc);
+            printf("chunked response is complete\n");
+            return 0;
+        }
+
+        if (pr->response_info.response_type == CONTENT_LENGTH && pr->response_used >= pr->response_info.header_size + pr->response_info.response_size)
+        {
+            pr->response_used = 0;
+            pr->sent = 0;
+            pr->response_info.response_size = 0;
+            pr->response_info.header_size = 0;
+            pr->response_info.response_type = -1;
+            dequeue(&pending_requests_queue);
+            handle_queue(uc);
+            printf("content length response is complete\n");
+            return 0;
+        }
+    }
+}
+
+int request_is_complete(char *buf, ssize_t request_size)
+{
+    return buf[request_size - 1] == '\n' && buf[request_size - 2] == '\r' && buf[request_size - 3] == '\n' && buf[request_size - 4] == '\r';
 }
 
 int content_length_response_is_complete(char *response, size_t response_size)
@@ -277,9 +324,8 @@ int response_is_complete(char *response, size_t response_size)
 
     // logic for is chunked response analyze
     int i;
-    char header_name[128], header_value[512];
+    char header_name[128];
     size_t header_name_i = 0;
-    size_t header_value_i = 0;
     unsigned char header_name_is_done = 0;
 
     for (i = 0; i < response_size; i++)
@@ -345,32 +391,6 @@ int tcp_listen(const char *host, in_port_t port)
     return sfd;
 }
 
-int handle_queue(struct upstream_connection *uc)
-{
-    struct pending_request *first = peek(&pending_requests_queue);
-
-    if (first == NULL)
-    {
-        return 1;
-    }
-
-    while (first->sent < first->request_used)
-    {
-        ssize_t upstream_send_result = upstream_connection_send(uc, first->request + first->sent, first->request_used - first->sent);
-
-        if (upstream_send_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
-        {
-            return -1;
-        }
-
-        first->sent += upstream_send_result;
-    }
-
-    first->is_request_finished = 0;
-
-    return 1;
-}
-
 int on_client_data(int client_socket, void *payload)
 {
 
@@ -397,7 +417,9 @@ int on_client_data(int client_socket, void *payload)
 
         pr->request_used += recv_result;
 
-        if (request_is_complete(pr->request))
+        printf("->   *      %ld B\n", recv_result);
+
+        if (request_is_complete(pr->request, pr->request_used))
         {
             pr->is_request_finished = 1;
             enqueue(&pending_requests_queue, pr);
@@ -412,8 +434,6 @@ int on_client_data(int client_socket, void *payload)
             close(client_socket);
             return 0;
         }
-
-        printf("->   *      %ld B\n", recv_result);
     }
 
     return 1;
