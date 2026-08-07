@@ -135,6 +135,10 @@ void upstream_response_handler(uint8_t *upstream_response_buffer, ssize_t upstre
 {
     printf("     * <-   %ld B\n", upstream_response_size);
 
+    while(1) {
+
+    }
+
     ssize_t client_send_result = send(client_socket, upstream_response_buffer, upstream_response_size, 0);
 
     printf("<-   *      %ld B\n", client_send_result);
@@ -313,40 +317,6 @@ int request_is_complete(char *buf, ssize_t request_size)
     return buf[request_size - 1] == '\n' && buf[request_size - 2] == '\r' && buf[request_size - 3] == '\n' && buf[request_size - 4] == '\r';
 }
 
-int content_length_response_is_complete(char *response, size_t response_size)
-{
-    return CHUNKED;
-}
-
-int response_is_complete(char *response, size_t response_size)
-{
-    unsigned char is_chunked;
-
-    // logic for is chunked response analyze
-    int i;
-    char header_name[128];
-    size_t header_name_i = 0;
-    unsigned char header_name_is_done = 0;
-
-    for (i = 0; i < response_size; i++)
-    {
-        if (response[i] == ':')
-        {
-            header_name[header_name_i] = '\0';
-            continue;
-        }
-
-        header_name[header_name_i++] = response[i];
-    }
-
-    if (is_chunked)
-    {
-        return chunked_response_is_complete(response, response_size);
-    }
-
-    return content_length_response_is_complete(response, response_size);
-}
-
 int tcp_listen(const char *host, in_port_t port)
 {
     int sfd;
@@ -508,22 +478,3 @@ int main(int argc, char *argv[])
     event_loop_add(&event_loop, sfd, POLLIN, &action);
     event_loop_start(&event_loop);
 }
-
-// upstream server response is added to el
-
-// client connection is created
-// for each client connection buffer is created
-// when data comes on client socket, add it to buffer untill request is complete
-// once request is complete, add it to the pending_requests queue
-
-// go over queue
-// if item in queue, send request to upstream
-// get response from upstream
-// if response is complete, remove item from the queue
-
-// client request is received
-// some instance is added to queue
-// upstream socket data notification
-// take first item from queue
-// process response from upstream socket
-// if full response is served, remove item from queue
