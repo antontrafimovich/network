@@ -1,3 +1,5 @@
+#define _XOPEN_SOURCE 600
+#include <time.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include "event_loop.h"
@@ -21,6 +23,22 @@ int event_loop_destroy(struct event_loop *el)
 
 int event_loop_add(struct event_loop *el, int fd, short int events, struct event_loop_action *action)
 {
+    int i;
+
+    for (i = 0; i < sizeof(el->_pfds); i++)
+    {
+        if (el->_pfds[i].fd == -1)
+        {
+            el->_pfds[i].fd = fd;
+            el->_pfds[i].events = events;
+
+            el->_actions[i] = action;
+            el->_npfds++;
+
+            return 0;
+        }
+    }
+
     el->_pfds[el->_npfds].fd = fd;
     el->_pfds[el->_npfds].events = events;
 
@@ -36,9 +54,29 @@ int event_loop_start(struct event_loop *el)
     while (1)
     {
         int ready;
+        struct timespec start_ts, end_ts;
+        double elapsed;
+
+        printf("Waiting for events from poll\n");
+
+        if (clock_gettime(CLOCK_MONOTONIC, &start_ts) == -1)
+        {
+            perror("clock_gettime start failed");
+            exit(EXIT_FAILURE);
+        }
 
         ready = poll(el->_pfds, el->_npfds, -1);
 
+        if (clock_gettime(CLOCK_MONOTONIC, &end_ts) == -1)
+        {
+            perror("clock_gettime end failed");
+            exit(EXIT_FAILURE);
+        }
+
+        elapsed = (end_ts.tv_sec - start_ts.tv_sec) +
+                  (end_ts.tv_nsec - start_ts.tv_nsec) / 1e9;
+
+        printf("poll waited %.9f seconds\n", elapsed);
         printf("%d events happened in poll\n", ready);
 
         if (ready == -1)
@@ -81,10 +119,28 @@ int event_loop_start(struct event_loop *el)
                 printf("closing fd=%d\n", el->_pfds[i].fd);
                 close(el->_pfds[i].fd);
                 el->_pfds[i].fd = -1;
-                // npfds--;
+                el->_pfds[i].events = 0;
+                el->_actions[i] = NULL;
             }
 
             ready--;
         }
     }
+}
+
+int event_loop_remove(struct event_loop *el, int fd, int events, int (*action)(int fd, void *payload))
+{
+    int i;
+
+    for (i = 0; i < el->_npfds; i++)
+    {
+        if (el->_pfds[i].fd == fd && el->_pfds[i].events == events && el->_actions[i]->action == action)
+        {
+            el->_pfds[i].fd = -1;
+            el->_pfds[i].events = 0;
+            el->_actions[i] = NULL;
+        }
+    }
+
+    return 0;
 }

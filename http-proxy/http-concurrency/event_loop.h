@@ -17,4 +17,5 @@ struct event_loop
 int event_loop_init(struct event_loop *el);
 int event_loop_destroy(struct event_loop *el);
 int event_loop_add(struct event_loop *el, int fd, short int events, struct event_loop_action *action);
+int event_loop_remove(struct event_loop *el, int fd, int events, int (*action)(int fd, void *payload));
 int event_loop_start(struct event_loop *el);
