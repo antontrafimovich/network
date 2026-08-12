@@ -1,0 +1,30 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build concur debug",
+            "type": "shell",
+            "command": "gcc",
+            "args": [
+                "-g",
+                "-O0",
+                "-Wall",
+                "-Wextra",
+                "-o",
+                "${workspaceFolder}/concur",
+                "${workspaceFolder}/concur.c",
+                "${workspaceFolder}/queue.c",
+                "${workspaceFolder}/hashtable.h",
+                "${workspaceFolder}/event_loop.c"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": "$gcc",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        }
+    ]
+}
