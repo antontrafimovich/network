@@ -8,6 +8,7 @@ const app = express();
 const port = 8081;
 const assetsDir = path.join(__dirname, "assets");
 const useChunkedTransfer = process.argv.includes("--chunked");
+const stylesTimeoutMs = 3000;
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -60,6 +61,27 @@ function getChunkText(chunk, encoding) {
   }
 
   return "";
+}
+
+function sendFile(req, res, filePath, stat) {
+  res.setHeader(
+    "Content-Type",
+    contentTypes[path.extname(filePath).toLowerCase()] ||
+      "application/octet-stream",
+  );
+
+  if (!useChunkedTransfer) {
+    res.setHeader("Content-Length", stat.size);
+  }
+
+  if (req.method === "HEAD") {
+    res.end();
+    return;
+  }
+
+  console.log("Sending", filePath);
+
+  fs.createReadStream(filePath).pipe(res);
 }
 
 function observeNodeHttpErrors(server) {
@@ -140,22 +162,12 @@ app.use((req, res, next) => {
       return;
     }
 
-    res.setHeader(
-      "Content-Type",
-      contentTypes[path.extname(filePath).toLowerCase()] ||
-        "application/octet-stream",
-    );
-
-    if (!useChunkedTransfer) {
-      res.setHeader("Content-Length", stat.size);
-    }
-
-    if (req.method === "HEAD") {
-      res.end();
+    if (path.basename(filePath) === "styles.css") {
+      setTimeout(() => sendFile(req, res, filePath, stat), stylesTimeoutMs);
       return;
     }
 
-    fs.createReadStream(filePath).pipe(res);
+    sendFile(req, res, filePath, stat);
   });
 });
 
