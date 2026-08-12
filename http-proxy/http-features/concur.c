@@ -43,12 +43,13 @@ struct pending_request
 {
     int client_socket;
     int is_request_finished;
-    ssize_t sent;
     int8_t request[4096];
     ssize_t request_used;
-    int8_t response[8192];
+    ssize_t request_sent;
+    int8_t response_temp[4096];
+    int8_t *response;
     ssize_t response_used;
-    ssize_t response_headers_used;
+    ssize_t response_sent;
     struct response_info response_info;
 };
 
@@ -131,13 +132,50 @@ int process_response(char *response_with_headers, size_t response_size, struct r
     }
 }
 
-void upstream_response_handler(uint8_t *upstream_response_buffer, ssize_t upstream_response_size, int client_socket)
+int downstream_data_ready(int client_socket, void *payload)
 {
-    printf("     * <-   %ld B\n", upstream_response_size);
+    struct pending_request *pr = payload;
 
-    ssize_t client_send_result = send(client_socket, upstream_response_buffer, upstream_response_size, 0);
+    uint8_t *buffer;
+    ssize_t size;
 
-    printf("<-   *      %ld B\n", client_send_result);
+    while (pr->response_sent < pr->response_used)
+    {
+        ssize_t client_send_result = send(client_socket, pr->response + pr->response_sent, pr->response_used - pr->response_sent, MSG_DONTWAIT);
+
+        printf("  <-   *      %ld B\n", client_send_result);
+
+        if (client_send_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            return 0;
+        }
+
+        if (client_send_result == -1)
+        {
+            perror("error during sending back to the client");
+            return -1;
+        }
+
+        if (client_send_result == 0)
+        {
+            printf("client socket has been closed\n");
+            return 0;
+        }
+
+        pr->response_sent += client_send_result;
+    }
+
+    pr->response_used = 0;
+    pr->request_sent = 0;
+    pr->response_sent = 0;
+    free(pr->response);
+    pr->response = NULL;
+    pr->response_info.response_size = 0;
+    pr->response_info.header_size = 0;
+    pr->response_info.response_type = -1;
+
+    event_loop_remove(&event_loop, client_socket, POLLOUT, &downstream_data_ready);
+    return 0;
 }
 
 int upstream_connection_create(struct upstream_connection *uc)
@@ -220,16 +258,16 @@ int handle_queue(struct upstream_connection *uc)
         return 1;
     }
 
-    while (first->sent < first->request_used)
+    while (first->request_sent < first->request_used)
     {
-        ssize_t upstream_send_result = upstream_connection_send(uc, first->request + first->sent, first->request_used - first->sent);
+        ssize_t upstream_send_result = upstream_connection_send(uc, first->request + first->request_sent, first->request_used - first->request_sent);
 
         if (upstream_send_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
             return -1;
         }
 
-        first->sent += upstream_send_result;
+        first->request_sent += upstream_send_result;
     }
 
     first->is_request_finished = 0;
@@ -242,6 +280,8 @@ int on_upstream_data(int upstream_fd, void *payload)
 {
     struct pending_request *pr = (struct pending_request *)peek(&pending_requests_queue);
     struct upstream_connection *uc = payload;
+    int8_t *response_storage;
+    size_t response_storage_size;
 
     if (pr == NULL)
     {
@@ -250,43 +290,47 @@ int on_upstream_data(int upstream_fd, void *payload)
 
     while (1)
     {
-        ssize_t upstream_recv_result = recv(upstream_fd, pr->response + pr->response_headers_used, sizeof(pr->response) - pr->response_headers_used, MSG_DONTWAIT);
+        if (pr->response != NULL)
+        {
+            response_storage = pr->response;
+            response_storage_size = sizeof(pr->response);
+        }
+        else
+        {
+            response_storage = pr->response_temp;
+            response_storage_size = sizeof(pr->response_temp);
+        }
+
+        ssize_t upstream_recv_result = recv(upstream_fd, response_storage + pr->response_used, response_storage_size - pr->response_used, MSG_DONTWAIT);
+
+        printf("     * <-   %ld B\n", upstream_recv_result);
 
         if (upstream_recv_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
             break;
         }
 
-        if (upstream_recv_result == 0) {
-            printf("response headers used %ld\n", pr->response_headers_used);
-        }
-
         if (pr->response_info.response_type == UNKNOWN || !pr->response_info.response_type)
         {
-            process_response(pr->response, upstream_recv_result, &(pr->response_info));
+            process_response(pr->response_temp, upstream_recv_result, &(pr->response_info));
         }
 
         pr->response_used += upstream_recv_result;
 
-        upstream_response_handler(pr->response + pr->response_headers_used, upstream_recv_result, pr->client_socket);
-
-        if (pr->response_info.response_type == UNKNOWN)
+        if (pr->response_info.response_type != UNKNOWN && pr->response == NULL)
         {
-
-            pr->response_headers_used += upstream_recv_result;
-        }
-        else
-        {
-            pr->response_headers_used = 0;
+            pr->response = malloc(pr->response_info.header_size + pr->response_info.response_size);
+            memcpy(pr->response, pr->response_temp, pr->response_used);
         }
 
-        if (pr->response_info.response_type == CHUNKED && chunked_response_is_complete(pr->response, upstream_recv_result))
+        if (pr->response_info.response_type == CHUNKED && chunked_response_is_complete(response_storage, pr->response_used))
         {
-            pr->response_used = 0;
-            pr->sent = 0;
-            pr->response_info.response_size = 0;
-            pr->response_info.header_size = 0;
-            pr->response_info.response_type = -1;
+            struct event_loop_action *el_action = calloc(1, sizeof(struct event_loop_action));
+            el_action->action = &downstream_data_ready;
+            el_action->payload = pr;
+
+            event_loop_add(&event_loop, pr->client_socket, POLLOUT, el_action);
+
             dequeue(&pending_requests_queue);
             handle_queue(uc);
             printf("chunked response is complete\n");
@@ -295,11 +339,12 @@ int on_upstream_data(int upstream_fd, void *payload)
 
         if (pr->response_info.response_type == CONTENT_LENGTH && pr->response_used >= pr->response_info.header_size + pr->response_info.response_size)
         {
-            pr->response_used = 0;
-            pr->sent = 0;
-            pr->response_info.response_size = 0;
-            pr->response_info.header_size = 0;
-            pr->response_info.response_type = -1;
+            struct event_loop_action *el_action = calloc(1, sizeof(struct event_loop_action));
+            el_action->action = &downstream_data_ready;
+            el_action->payload = pr;
+
+            event_loop_add(&event_loop, pr->client_socket, POLLOUT, el_action);
+
             dequeue(&pending_requests_queue);
             handle_queue(uc);
             printf("content length response is complete\n");
@@ -311,40 +356,6 @@ int on_upstream_data(int upstream_fd, void *payload)
 int request_is_complete(char *buf, ssize_t request_size)
 {
     return buf[request_size - 1] == '\n' && buf[request_size - 2] == '\r' && buf[request_size - 3] == '\n' && buf[request_size - 4] == '\r';
-}
-
-int content_length_response_is_complete(char *response, size_t response_size)
-{
-    return CHUNKED;
-}
-
-int response_is_complete(char *response, size_t response_size)
-{
-    unsigned char is_chunked;
-
-    // logic for is chunked response analyze
-    int i;
-    char header_name[128];
-    size_t header_name_i = 0;
-    unsigned char header_name_is_done = 0;
-
-    for (i = 0; i < response_size; i++)
-    {
-        if (response[i] == ':')
-        {
-            header_name[header_name_i] = '\0';
-            continue;
-        }
-
-        header_name[header_name_i++] = response[i];
-    }
-
-    if (is_chunked)
-    {
-        return chunked_response_is_complete(response, response_size);
-    }
-
-    return content_length_response_is_complete(response, response_size);
 }
 
 int tcp_listen(const char *host, in_port_t port)
@@ -454,6 +465,7 @@ int on_connect(int sfd, void *payload)
     }
 
     struct pending_request *pr = calloc(1, sizeof(struct pending_request));
+    pr->response = NULL;
     pr->client_socket = client_socket;
 
     hashtable_kv_t *key_value = calloc(2, sizeof(hashtable_kv_t));
@@ -508,22 +520,3 @@ int main(int argc, char *argv[])
     event_loop_add(&event_loop, sfd, POLLIN, &action);
     event_loop_start(&event_loop);
 }
-
-// upstream server response is added to el
-
-// client connection is created
-// for each client connection buffer is created
-// when data comes on client socket, add it to buffer untill request is complete
-// once request is complete, add it to the pending_requests queue
-
-// go over queue
-// if item in queue, send request to upstream
-// get response from upstream
-// if response is complete, remove item from the queue
-
-// client request is received
-// some instance is added to queue
-// upstream socket data notification
-// take first item from queue
-// process response from upstream socket
-// if full response is served, remove item from queue
