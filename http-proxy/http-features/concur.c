@@ -61,6 +61,29 @@ Queue pending_requests_queue = {0};
 
 hashtable_t *client_socket_buffers = NULL;
 
+int alter_request(char *request, char *altered_request, size_t *size)
+{
+    size_t i = 0;
+
+    const char *xtra_header = "X-Header-Key:anton\r\n\r\n";
+
+    while (1)
+    {
+        if (request[i] == '\r' && request[i + 1] == '\n' && request[i + 2] == '\r' && request[i + 3] == '\n')
+        {
+            memcpy(altered_request, request, i + 2);
+            break;
+        }
+        i++;
+    }
+
+    strncpy(altered_request + i + 2, xtra_header, strlen(xtra_header));
+
+    *size = i + 2 + strlen(xtra_header);
+
+    return 1;
+}
+
 int chunked_response_is_complete(char *response, size_t response_size)
 {
     return response[response_size - 1] == '\n' && response[response_size - 2] == '\r' && response[response_size - 3] == '\n' && response[response_size - 4] == '\r' && response[response_size - 5] == '0';
@@ -258,9 +281,22 @@ int handle_queue(struct upstream_connection *uc)
         return 1;
     }
 
-    while (first->request_sent < first->request_used)
+    int8_t altered_request[4096];
+    size_t altered_request_size;
+    int8_t *request = first->request;
+    size_t request_size = first->request_used;
+
+    if (alter_request(first->request, altered_request, &altered_request_size) != 1)
     {
-        ssize_t upstream_send_result = upstream_connection_send(uc, first->request + first->request_sent, first->request_used - first->request_sent);
+        perror("alter request failed");
+    }
+
+    request = altered_request;
+    request_size = altered_request_size;
+
+    while (first->request_sent < request_size)
+    {
+        ssize_t upstream_send_result = upstream_connection_send(uc, request + first->request_sent, request_size - first->request_sent);
 
         if (upstream_send_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
