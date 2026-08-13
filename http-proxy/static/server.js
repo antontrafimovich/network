@@ -8,6 +8,7 @@ const app = express();
 const port = 8081;
 const assetsDir = path.join(__dirname, "assets");
 const useChunkedTransfer = process.argv.includes("--chunked");
+const logHeaders = process.argv.includes("--log-headers");
 const stylesTimeoutMs = 3000;
 
 const contentTypes = {
@@ -136,6 +137,13 @@ function observeNodeHttpErrors(server) {
 }
 
 app.use(morgan("combined"));
+
+if (logHeaders) {
+  app.use((req, res, next) => {
+    console.log(`Request headers: ${JSON.stringify(req.headers)}`);
+    next();
+  });
+}
 
 app.use((req, res, next) => {
   if (req.method !== "GET" && req.method !== "HEAD") {
