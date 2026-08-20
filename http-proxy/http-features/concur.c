@@ -10,12 +10,12 @@
 #include <poll.h>
 #include "queue.h"
 #include "event_loop.h"
+#include "zlib.h"
 
 #define HASHTABLE_IMPLEMENTATION
 #include "hashtable.h"
 
-#define CHUNKED_RESPONSE 1;
-#define CONTENT_LENGTH_RESPONSE 2;
+#define CHUNK 16384
 
 enum RESPONSE_TYPE
 {
@@ -60,6 +60,60 @@ struct event_loop event_loop = {0};
 Queue pending_requests_queue = {0};
 
 hashtable_t *client_socket_buffers = NULL;
+
+char *gzip_response(char *response, struct response_info *response_info)
+{
+    size_t i = 0;
+
+    const char *gzip_header = "Content-Encoding:gzip\r\n";
+
+    char cl_header[26];
+
+    int ret;
+    z_stream strm;
+
+    unsigned char *in = response;
+    unsigned char *out = calloc(response_info->header_size + response_info->response_size, sizeof(unsigned char));
+
+    strm.zalloc = Z_NULL;
+    strm.zfree = Z_NULL;
+    strm.opaque = Z_NULL;
+
+    ret = deflateInit(&strm, 1);
+
+    if (ret != Z_OK)
+        return NULL;
+
+    strm.avail_in = response_info->header_size + response_info->response_size;
+    strm.next_in = in;
+    strm.avail_out = response_info->header_size + response_info->response_size;
+    strm.next_out = out;
+
+    ret = deflate(&strm, Z_FINISH);
+
+    int cl_header_content_size = snprintf(cl_header, 26, "Content-Length:%ld\r\n\r\n", strm.total_out);
+
+    printf("The return size is %ld\n", strm.total_out);
+
+    char *gzipped_response = malloc(response_info->header_size + cl_header_content_size + strlen(gzip_header) + strm.total_out);
+
+    char old_content_length[26];
+    size_t old_content_length_size = snprintf(old_content_length, 26, "Content-Length: %ld\r\n", response_info->response_size);
+
+    char *first_part = strstr(response, old_content_length);
+
+    response_info->response_size = strm.total_out;
+
+    char *p;
+
+    p = strncpy(gzipped_response, response, first_part - response);
+    p = strncpy(gzipped_response + (first_part - response), first_part + old_content_length_size, response_info->header_size - (first_part - response) - old_content_length_size - 2);
+    p = strncpy(p + response_info->header_size - (first_part - response) - old_content_length_size - 2, gzip_header, strlen(gzip_header));
+    p = strncpy(p + strlen(gzip_header), cl_header, cl_header_content_size);
+    p = (char *)memcpy(p + cl_header_content_size, out, strm.total_out);
+
+    return gzipped_response;
+}
 
 int alter_request(char *request, char *altered_request, size_t *size)
 {
@@ -159,12 +213,13 @@ int downstream_data_ready(int client_socket, void *payload)
 {
     struct pending_request *pr = payload;
 
-    uint8_t *buffer;
-    ssize_t size;
+    char *gzipped_response = gzip_response(pr->response, &pr->response_info);
+    const size_t full_response_size = pr->response_info.response_size + pr->response_info.header_size;
 
-    while (pr->response_sent < pr->response_used)
+    while (pr->response_sent < full_response_size)
     {
-        ssize_t client_send_result = send(client_socket, pr->response + pr->response_sent, pr->response_used - pr->response_sent, MSG_DONTWAIT);
+
+        ssize_t client_send_result = send(client_socket, gzipped_response + pr->response_sent, full_response_size - pr->response_sent, MSG_DONTWAIT);
 
         printf("  <-   *      %ld B\n", client_send_result);
 
@@ -192,6 +247,7 @@ int downstream_data_ready(int client_socket, void *payload)
     pr->request_sent = 0;
     pr->response_sent = 0;
     free(pr->response);
+    free(gzipped_response);
     pr->response = NULL;
     pr->response_info.response_size = 0;
     pr->response_info.header_size = 0;
