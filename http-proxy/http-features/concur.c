@@ -95,7 +95,7 @@ char *gzip_response(char *response, struct response_info *response_info)
 
     printf("The return size is %ld\n", strm.total_out);
 
-    char *gzipped_response = malloc(response_info->header_size + cl_header_content_size + strlen(gzip_header) + strm.total_out);
+    char *gzipped_response = calloc(response_info->header_size + cl_header_content_size + strlen(gzip_header) + strm.total_out, sizeof(char));
 
     char old_content_length[26];
     size_t old_content_length_size = snprintf(old_content_length, 26, "Content-Length: %ld\r\n", response_info->response_size);
@@ -110,7 +110,7 @@ char *gzip_response(char *response, struct response_info *response_info)
     p = strncpy(gzipped_response + (first_part - response), first_part + old_content_length_size, response_info->header_size - (first_part - response) - old_content_length_size - 2);
     p = strncpy(p + response_info->header_size - (first_part - response) - old_content_length_size - 2, gzip_header, strlen(gzip_header));
     p = strncpy(p + strlen(gzip_header), cl_header, cl_header_content_size);
-    response_info->header_size = first_part - response + strlen(gzip_header) + cl_header_content_size;
+    response_info->header_size = first_part - response + response_info->header_size - (first_part - response) - old_content_length_size - 2 + strlen(gzip_header) + cl_header_content_size;
 
     p = (char *)memcpy(p + cl_header_content_size, out, strm.total_out);
 
