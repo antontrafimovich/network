@@ -65,15 +65,15 @@ char *gzip_response(char *response, struct response_info *response_info)
 {
     size_t i = 0;
 
-    const char *gzip_header = "Content-Encoding:gzip\r\n";
+    const char *gzip_header = "Content-Encoding:deflate\r\n";
 
     char cl_header[26];
 
     int ret;
     z_stream strm;
 
-    unsigned char *in = response;
-    unsigned char *out = calloc(response_info->header_size + response_info->response_size, sizeof(unsigned char));
+    unsigned char *in = response + response_info->header_size;
+    unsigned char *out = calloc(response_info->response_size, sizeof(unsigned char));
 
     strm.zalloc = Z_NULL;
     strm.zfree = Z_NULL;
@@ -84,9 +84,9 @@ char *gzip_response(char *response, struct response_info *response_info)
     if (ret != Z_OK)
         return NULL;
 
-    strm.avail_in = response_info->header_size + response_info->response_size;
+    strm.avail_in = response_info->response_size;
     strm.next_in = in;
-    strm.avail_out = response_info->header_size + response_info->response_size;
+    strm.avail_out = response_info->response_size;
     strm.next_out = out;
 
     ret = deflate(&strm, Z_FINISH);
@@ -110,6 +110,8 @@ char *gzip_response(char *response, struct response_info *response_info)
     p = strncpy(gzipped_response + (first_part - response), first_part + old_content_length_size, response_info->header_size - (first_part - response) - old_content_length_size - 2);
     p = strncpy(p + response_info->header_size - (first_part - response) - old_content_length_size - 2, gzip_header, strlen(gzip_header));
     p = strncpy(p + strlen(gzip_header), cl_header, cl_header_content_size);
+    response_info->header_size = first_part - response + strlen(gzip_header) + cl_header_content_size;
+
     p = (char *)memcpy(p + cl_header_content_size, out, strm.total_out);
 
     return gzipped_response;
