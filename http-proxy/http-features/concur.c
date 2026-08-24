@@ -67,7 +67,7 @@ char *gzip_response(char *response, struct response_info *response_info)
 
     const char *gzip_header = "Content-Encoding:deflate\r\n";
 
-    char cl_header[26];
+    char cl_header[30];
 
     int ret;
     z_stream strm;
@@ -91,7 +91,7 @@ char *gzip_response(char *response, struct response_info *response_info)
 
     ret = deflate(&strm, Z_FINISH);
 
-    int cl_header_content_size = snprintf(cl_header, 26, "Content-Length:%ld\r\n\r\n", strm.total_out);
+    int cl_header_content_size = snprintf(cl_header, 30, "Content-Length:%ld\r\n\r\n", strm.total_out);
 
     printf("The return size is %ld\n", strm.total_out);
 
@@ -387,7 +387,7 @@ int on_upstream_data(int upstream_fd, void *payload)
         if (pr->response != NULL)
         {
             response_storage = pr->response;
-            response_storage_size = sizeof(pr->response);
+            response_storage_size = pr->response_info.header_size + pr->response_info.response_size;
         }
         else
         {
@@ -402,6 +402,14 @@ int on_upstream_data(int upstream_fd, void *payload)
         if (upstream_recv_result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
             break;
+        }
+
+        if (upstream_recv_result == -1) {
+            perror("recv failed");
+        }
+
+        if (upstream_recv_result == 0) {
+            printf("something happened with upstream\n");
         }
 
         if (pr->response_info.response_type == UNKNOWN || !pr->response_info.response_type)

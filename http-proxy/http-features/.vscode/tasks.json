@@ -14,8 +14,8 @@
                 "${workspaceFolder}/concur",
                 "${workspaceFolder}/concur.c",
                 "${workspaceFolder}/queue.c",
-                "${workspaceFolder}/hashtable.h",
-                "${workspaceFolder}/event_loop.c"
+                "${workspaceFolder}/event_loop.c",
+                "-lz"
             ],
             "options": {
                 "cwd": "${workspaceFolder}"
