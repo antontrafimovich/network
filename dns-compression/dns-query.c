@@ -6,6 +6,12 @@
 #include <stdint.h>
 #include <string.h>
 
+#define ISCOMPRESSED(b) ((b >> 6) == 0x03)
+
+#define ISALPHANUMERIC(b) (b >= 40 && b <= 122)
+
+#define HEADER_SIZE 12
+
 struct domain_response
 {
     char *name;
@@ -20,7 +26,7 @@ void print_byte_binary(unsigned char byte)
     }
 }
 
-void str_to_header_value(char *str, char *buf)
+void str_to_qname_value(char *str, char *buf)
 {
     unsigned char *label_len = (unsigned char *)buf++;
     unsigned char len = 0;
@@ -46,46 +52,50 @@ void str_to_header_value(char *str, char *buf)
     *buf = 0;
 }
 
-int dns_response_to_user_frinedly(uint8_t *resp, size_t resp_length)
+int dns_response_to_user_friendly(uint8_t *dns_response, size_t resp_length)
 {
     int i;
-    unsigned int HEADER_LENGTH = 12;
-    unsigned short ancount = resp[7];
+    uint16_t ancount = dns_response[7];
+    uint8_t *dns_response_p = dns_response;
 
     char name[32] = {0};
     char *name_p = name;
-    size_t handled = HEADER_LENGTH;
+    size_t handled = HEADER_SIZE;
 
-    resp += HEADER_LENGTH;
+    dns_response_p += HEADER_SIZE;
 
-    while (*resp != 0)
+    while (*dns_response_p != 0)
     {
-        if (*resp < 40 || *resp > 122)
+        if (ISALPHANUMERIC(*dns_response_p))
+        {
+            *name_p++ = *dns_response_p++;
+        }
+        else
         {
             *name_p++ = '.';
-            handled++;
-            resp++;
-            continue;
+            dns_response_p++;
         }
 
-        *name_p++ = *resp++;
         handled++;
     }
 
     *name_p++ = '\0';
 
-    resp += 5;
+    dns_response_p += 5;
     handled += 5;
 
     int ip_octets_to_handle = 0;
 
+    printf("dns response byte: %d\n", *dns_response_p);
+    printf("is compressed: %d\n", ISCOMPRESSED(*dns_response_p));
+
     while (handled < resp_length)
     {
-        if (*resp == 0xc0)
+        if (ISCOMPRESSED(*dns_response_p))
         {
             printf("%s: ", name);
-            resp += 12;
-            ip_octets_to_handle = *(resp - 1);
+            dns_response_p += 12;
+            ip_octets_to_handle = *(dns_response_p - 1);
             handled += 12;
         }
 
@@ -93,7 +103,7 @@ int dns_response_to_user_frinedly(uint8_t *resp, size_t resp_length)
         {
             while (ip_octets_to_handle-- > 0)
             {
-                printf(ip_octets_to_handle == 0 ? "%d\n" : "%d.", *(unsigned char *)(resp++));
+                printf(ip_octets_to_handle == 0 ? "%d\n" : "%d.", *(unsigned char *)(dns_response_p++));
                 handled++;
             }
         }
@@ -110,9 +120,13 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    struct sockaddr_in addr = {0};
-    struct in_addr in_addr = {htonl(0x0afffffe)};
+    struct in_addr in_addr;
+    if (!inet_pton(AF_INET, "1.1.1.1", &in_addr) == -1)
+    {
+        perror("inet_pton failed");
+    }
 
+    struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(53);
     addr.sin_addr = in_addr;
@@ -123,7 +137,7 @@ int main(int argc, char **argv)
     }
 
     char buf[4096] = {0};
-    char *host = "www.example.com";
+    char *host = "d3js.org";
     size_t question_len = strlen(host) + 2;
 
     buf[0] = 0x1f;
@@ -131,7 +145,7 @@ int main(int argc, char **argv)
     buf[2] = 0;
     buf[3] = 0;
     buf[4] = 0;
-    buf[5] = 0x01;
+    buf[5] = 1;
     buf[6] = 0;
     buf[7] = 0;
     buf[8] = 0;
@@ -139,7 +153,7 @@ int main(int argc, char **argv)
     buf[10] = 0;
     buf[11] = 0;
 
-    str_to_header_value(host, buf + 12);
+    str_to_qname_value(host, buf + 12);
 
     buf[12 + question_len] = 0x0;
     buf[13 + question_len] = 0x01;
@@ -152,13 +166,13 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    uint8_t query[512];
+    uint8_t dns_response[512];
     ssize_t query_length;
     size_t used = 0;
     while (1)
     {
 
-        query_length = recv(fd, query + used, 512 - used, 0);
+        query_length = recv(fd, dns_response + used, 512 - used, 0);
 
         if (query_length == -1)
         {
@@ -179,12 +193,12 @@ int main(int argc, char **argv)
     printf("The received dns result is: ");
     for (i = 0; i < query_length; i++)
     {
-        printf("\\%02x", query[i]);
+        printf("\\%02x", dns_response[i]);
         // print_byte_binary(query[i]);
     }
     printf("\n");
 
-    dns_response_to_user_frinedly(query, query_length);
+    dns_response_to_user_friendly(dns_response, query_length);
 
     return 0;
 }
