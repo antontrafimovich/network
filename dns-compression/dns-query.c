@@ -12,6 +12,8 @@
 
 #define ISALPHANUMERIC(b) (b >= 40 && b <= 122)
 
+#define COMPRESSEDTOOFFSET(b, c) (((b & 0x3f) << 8) | c)
+
 #define HEADER_SIZE 12
 
 struct domain_response
@@ -25,6 +27,16 @@ struct domain_message_question
     char name[256];
     uint16_t type;
     uint16_t class;
+};
+
+struct domain_message_answer
+{
+    char name[256];
+    uint16_t type;
+    uint16_t class;
+    uint32_t ttl;
+    uint16_t rdlength;
+    uint8_t *rdata;
 };
 
 struct domain_message
@@ -43,6 +55,7 @@ struct domain_message
     uint16_t nscount_authority_section_entries_number;
     uint16_t arcount_additinal_section_entries_number;
     struct domain_message_question *questions;
+    struct domain_message_answer *answers;
 };
 
 void print_byte_binary(unsigned char byte)
@@ -101,26 +114,64 @@ int dns_name_to_string(uint8_t *dns_section_record_start, char *name)
     return 0;
 }
 
-int parse_dns_question_entry(struct domain_message_question question, uint8_t *dns_response)
+int parse_dns_question_entry(struct domain_message_question *question, uint8_t *dns_response, size_t question_entry_offset, size_t *question_length)
 {
     const size_t null_root_label_length = 1;
-    uint8_t *dns_question_section_p = dns_response + 12;
+    uint8_t *dns_question_section_p = dns_response + question_entry_offset;
 
     if (!ISCOMPRESSED(*dns_question_section_p))
     {
-        dns_name_to_string(dns_question_section_p, question.name);
-        dns_question_section_p += strlen(question.name) + null_root_label_length;
+        dns_name_to_string(dns_question_section_p, question->name);
+        dns_question_section_p += strlen(question->name) + null_root_label_length;
     }
 
-    // while (*dns_response_p != 0)
-    // {
-    //     if (ISCOMPRESSED(*dns_response_p))
-    //     {
-    //     }
-    //     else
-    //     {
-    //     }
-    // }
+    question->type = (uint16_t)((dns_question_section_p[0] << 8) | dns_question_section_p[1]);
+    dns_question_section_p += 2;
+
+    question->class = (uint16_t)((dns_question_section_p[0] << 8) | dns_question_section_p[1]);
+    dns_question_section_p += 2;
+
+    *question_length = dns_question_section_p - dns_response - question_entry_offset;
+
+    return 0;
+}
+
+int parse_dns_answer_entry(struct domain_message_answer *answer, uint8_t *dns_response, size_t answer_entry_offset, size_t *answer_length)
+{
+    const size_t null_root_label_length = 1;
+    uint8_t *dns_answer_section_p = dns_response + answer_entry_offset;
+
+    if (!ISCOMPRESSED(*dns_answer_section_p))
+    {
+        dns_name_to_string(dns_answer_section_p, answer->name);
+        dns_answer_section_p += strlen(answer->name) + null_root_label_length;
+    }
+    else
+    {
+        dns_name_to_string(dns_response + COMPRESSEDTOOFFSET(dns_answer_section_p[0], dns_answer_section_p[1]), answer->name);
+        dns_answer_section_p += 2;
+    }
+
+    answer->type = (uint16_t)((dns_answer_section_p[0] << 8) | dns_answer_section_p[1]);
+    dns_answer_section_p += 2;
+
+    answer->class = (uint16_t)((dns_answer_section_p[0] << 8) | dns_answer_section_p[1]);
+    dns_answer_section_p += 2;
+
+    memcpy(&answer->ttl, dns_answer_section_p, 4);
+    answer->ttl = ntohl(answer->ttl);
+    dns_answer_section_p += 4;
+
+    answer->rdlength = (uint16_t)((dns_answer_section_p[0] << 8) | dns_answer_section_p[1]);
+    dns_answer_section_p += 2;
+
+    answer->rdata = malloc(sizeof(uint8_t) * answer->rdlength);
+    memcpy(answer->rdata, dns_answer_section_p, answer->rdlength);
+    dns_answer_section_p += answer->rdlength;
+
+    *answer_length = dns_answer_section_p - dns_response - answer_entry_offset;
+
+    return 0;
 }
 
 int dns_response_to_user_friendly(uint8_t *dns_response, size_t resp_length)
@@ -166,12 +217,44 @@ int dns_response_to_user_friendly(uint8_t *dns_response, size_t resp_length)
     domain_message_answer.questions = malloc(sizeof(struct domain_message_question) * domain_message_answer.qdcount_question_section_entries_number);
 
     size_t i = 0;
+    size_t question_length = 0;
+    size_t question_entry_offset = dns_response_p - dns_response;
     while (i < domain_message_answer.qdcount_question_section_entries_number)
     {
-        parse_dns_question_entry(domain_message_answer.questions[i], dns_response_p);
-
+        parse_dns_question_entry(&domain_message_answer.questions[i], dns_response, question_entry_offset, &question_length);
+        question_entry_offset += question_length;
+        dns_response_p += question_length;
         i++;
     }
+
+    domain_message_answer.answers = malloc(sizeof(struct domain_message_answer) * domain_message_answer.arcount_additinal_section_entries_number);
+
+    size_t j = 0;
+    size_t answer_length = 0;
+    size_t answer_entry_offset = dns_response_p - dns_response;
+
+    while (j < domain_message_answer.ancount_answer_section_entries_number)
+    {
+        parse_dns_answer_entry(&domain_message_answer.answers[j], dns_response, answer_entry_offset, &answer_length);
+        answer_entry_offset += answer_length;
+        dns_response_p += answer_length;
+        j++;
+    }
+
+    size_t k;
+    for (k = 0; k < domain_message_answer.ancount_answer_section_entries_number; k++)
+    {
+        struct domain_message_answer aw = domain_message_answer.answers[k];
+        printf("%s: ", aw.name);
+
+        size_t l;
+        for (l = 0; l < aw.rdlength; l++)
+        {
+            printf(l == aw.rdlength - 1 ? "%d\n" : "%d.", aw.rdata[l]);
+        }
+    }
+
+    printf("end\n");
 
     // parse answer section entries
     // int i;
@@ -273,7 +356,7 @@ int main(int argc, char **argv)
     str_to_qname_value(host, buf + 12);
 
     buf[12 + question_len] = 0x0;
-    buf[13 + question_len] = 0x01;
+    buf[13 + question_len] = 0x02;
     buf[14 + question_len] = 0x0;
     buf[15 + question_len] = 0x01;
 
