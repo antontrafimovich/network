@@ -92,7 +92,7 @@ void str_to_qname_value(char *str, char *buf)
     *buf = 0;
 }
 
-int dns_name_to_string(uint8_t *dns_section_record_start, char *name)
+int dns_name_to_string(uint8_t *dns_section_record_start, char *name, uint8_t *dns_response_start, size_t *dns_name_length)
 {
     uint8_t *dns_section_record_start_p = dns_section_record_start;
 
@@ -102,11 +102,24 @@ int dns_name_to_string(uint8_t *dns_section_record_start, char *name)
         {
             *name++ = *dns_section_record_start_p++;
         }
+        else if (ISCOMPRESSED(*dns_section_record_start_p))
+        {
+            size_t decompressed_name_length = 0;
+            dns_name_to_string(dns_response_start + COMPRESSEDTOOFFSET(dns_section_record_start_p[0], dns_section_record_start_p[1]), name, dns_response_start, &decompressed_name_length);
+            name += decompressed_name_length;
+            dns_section_record_start_p += 1;
+            break;
+        }
         else
         {
             *name++ = '.';
             dns_section_record_start_p++;
         }
+    }
+
+    if (dns_name_length != NULL)
+    {
+        *dns_name_length = dns_section_record_start_p - dns_section_record_start + 1;
     }
 
     *name = '\0';
@@ -116,14 +129,11 @@ int dns_name_to_string(uint8_t *dns_section_record_start, char *name)
 
 int parse_dns_question_entry(struct domain_message_question *question, uint8_t *dns_response, size_t question_entry_offset, size_t *question_length)
 {
-    const size_t null_root_label_length = 1;
     uint8_t *dns_question_section_p = dns_response + question_entry_offset;
 
-    if (!ISCOMPRESSED(*dns_question_section_p))
-    {
-        dns_name_to_string(dns_question_section_p, question->name);
-        dns_question_section_p += strlen(question->name) + null_root_label_length;
-    }
+    size_t dns_name_length = 0;
+    dns_name_to_string(dns_question_section_p, question->name, dns_response, &dns_name_length);
+    dns_question_section_p += dns_name_length;
 
     question->type = (uint16_t)((dns_question_section_p[0] << 8) | dns_question_section_p[1]);
     dns_question_section_p += 2;
@@ -138,19 +148,11 @@ int parse_dns_question_entry(struct domain_message_question *question, uint8_t *
 
 int parse_dns_answer_entry(struct domain_message_answer *answer, uint8_t *dns_response, size_t answer_entry_offset, size_t *answer_length)
 {
-    const size_t null_root_label_length = 1;
     uint8_t *dns_answer_section_p = dns_response + answer_entry_offset;
 
-    if (!ISCOMPRESSED(*dns_answer_section_p))
-    {
-        dns_name_to_string(dns_answer_section_p, answer->name);
-        dns_answer_section_p += strlen(answer->name) + null_root_label_length;
-    }
-    else
-    {
-        dns_name_to_string(dns_response + COMPRESSEDTOOFFSET(dns_answer_section_p[0], dns_answer_section_p[1]), answer->name);
-        dns_answer_section_p += 2;
-    }
+    size_t dns_name_length = 0;
+    dns_name_to_string(dns_answer_section_p, answer->name, dns_response, &dns_name_length);
+    dns_answer_section_p += dns_name_length;
 
     answer->type = (uint16_t)((dns_answer_section_p[0] << 8) | dns_answer_section_p[1]);
     dns_answer_section_p += 2;
@@ -174,7 +176,7 @@ int parse_dns_answer_entry(struct domain_message_answer *answer, uint8_t *dns_re
     return 0;
 }
 
-int dns_response_to_user_friendly(uint8_t *dns_response, size_t resp_length)
+int dns_response_to_user_friendly(uint8_t *dns_response)
 {
     struct domain_message domain_message_answer = {0};
 
@@ -247,67 +249,25 @@ int dns_response_to_user_friendly(uint8_t *dns_response, size_t resp_length)
         struct domain_message_answer aw = domain_message_answer.answers[k];
         printf("%s: ", aw.name);
 
-        size_t l;
-        for (l = 0; l < aw.rdlength; l++)
+        if (aw.type == 1)
         {
-            printf(l == aw.rdlength - 1 ? "%d\n" : "%d.", aw.rdata[l]);
+            size_t l;
+            for (l = 0; l < aw.rdlength; l++)
+            {
+                printf(l == aw.rdlength - 1 ? "%d\n" : "%d.", aw.rdata[l]);
+            }
+        }
+
+        if (aw.type == 2)
+        {
+            char authoritatve_name_server[64];
+            dns_name_to_string(aw.rdata, authoritatve_name_server, dns_response, NULL);
+
+            printf("%s\n", authoritatve_name_server);
         }
     }
 
     printf("end\n");
-
-    // parse answer section entries
-    // int i;
-    // uint16_t ancount = dns_response[7];
-    // uint8_t *dns_response_p = dns_response;
-
-    // char name[32] = {0};
-    // char *name_p = name;
-    // size_t handled = HEADER_SIZE;
-
-    // dns_response_p += HEADER_SIZE;
-
-    // while (*dns_response_p != 0)
-    // {
-    //     if (ISALPHANUMERIC(*dns_response_p))
-    //     {
-    //         *name_p++ = *dns_response_p++;
-    //     }
-    //     else
-    //     {
-    //         *name_p++ = '.';
-    //         dns_response_p++;
-    //     }
-
-    //     handled++;
-    // }
-
-    // *name_p++ = '\0';
-
-    // dns_response_p += 5;
-    // handled += 5;
-
-    // int ip_octets_to_handle = 0;
-
-    // while (handled < resp_length)
-    // {
-    //     if (ISCOMPRESSED(*dns_response_p))
-    //     {
-    //         printf("%s: ", name);
-    //         dns_response_p += 12;
-    //         ip_octets_to_handle = *(dns_response_p - 1);
-    //         handled += 12;
-    //     }
-
-    //     if (ip_octets_to_handle != 0)
-    //     {
-    //         while (ip_octets_to_handle-- > 0)
-    //         {
-    //             printf(ip_octets_to_handle == 0 ? "%d\n" : "%d.", *(unsigned char *)(dns_response_p++));
-    //             handled++;
-    //         }
-    //     }
-    // }
 }
 
 int main(int argc, char **argv)
@@ -356,7 +316,7 @@ int main(int argc, char **argv)
     str_to_qname_value(host, buf + 12);
 
     buf[12 + question_len] = 0x0;
-    buf[13 + question_len] = 0x02;
+    buf[13 + question_len] = 0x01;
     buf[14 + question_len] = 0x0;
     buf[15 + question_len] = 0x01;
 
@@ -398,7 +358,7 @@ int main(int argc, char **argv)
     }
     printf("\n");
 
-    dns_response_to_user_friendly(dns_response, query_length);
+    dns_response_to_user_friendly(dns_response);
 
     return 0;
 }
