@@ -202,16 +202,16 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
 
     dns_response_p += 2;
 
-    domain_message_answer.qdcount_question_section_entries_number = (uint16_t)(dns_response_p[0] | dns_response_p[1]);
+    domain_message_answer.qdcount_question_section_entries_number = ((uint16_t)dns_response_p[0] << 8) | dns_response_p[1];
     dns_response_p += 2;
 
-    domain_message_answer.ancount_answer_section_entries_number = (uint16_t)(dns_response_p[0] | dns_response_p[1]);
+    domain_message_answer.ancount_answer_section_entries_number = ((uint16_t)dns_response_p[0] << 8) | dns_response_p[1];
     dns_response_p += 2;
 
-    domain_message_answer.nscount_authority_section_entries_number = (uint16_t)(dns_response_p[0] | dns_response_p[1]);
+    domain_message_answer.nscount_authority_section_entries_number = ((uint16_t)dns_response_p[0] << 8) | dns_response_p[1];
     dns_response_p += 2;
 
-    domain_message_answer.arcount_additinal_section_entries_number = (uint16_t)(dns_response_p[0] | dns_response_p[1]);
+    domain_message_answer.arcount_additinal_section_entries_number = ((uint16_t)dns_response_p[0] << 8) | dns_response_p[1];
     dns_response_p += 2;
     // end parse query response header
 
@@ -229,7 +229,7 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
         i++;
     }
 
-    domain_message_answer.answers = malloc(sizeof(struct domain_message_answer) * domain_message_answer.arcount_additinal_section_entries_number);
+    domain_message_answer.answers = malloc(sizeof(struct domain_message_answer) * domain_message_answer.ancount_answer_section_entries_number);
 
     size_t j = 0;
     size_t answer_length = 0;
