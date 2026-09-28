@@ -16,6 +16,12 @@
 
 #define HEADER_SIZE 12
 
+enum resolver_input_type
+{
+    ipv4 = 0,
+    domain = 1
+};
+
 struct domain_response
 {
     char *name;
@@ -69,7 +75,7 @@ void print_byte_binary(unsigned char byte)
 void str_to_qname_value(char *str, char *buf)
 {
     unsigned char *label_len = (unsigned char *)buf++;
-    unsigned char len = 0;
+    size_t len = 0;
 
     while (*str != '\0')
     {
@@ -265,9 +271,96 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
 
             printf("%s\n", authoritatve_name_server);
         }
+
+        if (aw.type == 12)
+        {
+            char pointer_value[64];
+            dns_name_to_string(aw.rdata, pointer_value, dns_response, NULL);
+
+            printf("%s\n", pointer_value);
+        }
     }
 
     printf("end\n");
+}
+
+void build_dns_inverse_query(char *domain, uint8_t *buf, size_t *dns_query_size)
+{
+    uint16_t id = 0x1f2f;
+    uint8_t qr_query_or_response = 0;
+    uint8_t opcode_operation_code = 0;
+    uint8_t aa_authoritative_answer = 0;
+    uint8_t tc_truncation = 0;
+    uint8_t rd_recursion_desired = 1;
+    uint8_t ra_recursion_available = 0;
+    uint8_t z_future_use = 0;
+    uint8_t rcode_response_code = 0;
+    uint16_t qdcount_question_entries_count = 1;
+    uint16_t ancount_answer_entries_count = 0;
+    uint16_t nscount_name_server_resource_records_count = 0;
+    uint16_t arcount_additional_records_count = 0;
+
+    buf[0] = (uint8_t)(id >> 8);
+    buf[1] = (uint8_t)(id & 0xff);
+    buf[2] = (qr_query_or_response << 7) | (opcode_operation_code << 3) | (aa_authoritative_answer << 2) | (tc_truncation << 1) | rd_recursion_desired;
+    buf[3] = (ra_recursion_available << 7) | (z_future_use << 4) | (rcode_response_code);
+    buf[4] = (uint8_t)(qdcount_question_entries_count >> 8);
+    buf[5] = (uint8_t)(qdcount_question_entries_count & 0xff);
+    buf[6] = (uint8_t)(ancount_answer_entries_count >> 8);
+    buf[7] = (uint8_t)(ancount_answer_entries_count & 0xff);
+    buf[8] = (uint8_t)(nscount_name_server_resource_records_count >> 8);
+    buf[9] = (uint8_t)(nscount_name_server_resource_records_count & 0xff);
+    buf[10] = (uint8_t)(arcount_additional_records_count >> 8);
+    buf[11] = (uint8_t)(arcount_additional_records_count & 0xff);
+
+    const char *inverse_domain_suffix = ".in-addr.arpa";
+    char *inverse_domain = malloc(strlen(domain) + strlen(inverse_domain_suffix) + 1);
+
+    size_t i;
+
+    char *tmp_domain = domain;
+    size_t label_len = 0;
+    size_t inverse_domain_offset = 0;
+
+    while (*tmp_domain != 0)
+    {
+        if (*tmp_domain == '.')
+        {
+            inverse_domain_offset += label_len;
+            strncpy(inverse_domain + strlen(domain) - inverse_domain_offset, (tmp_domain - label_len), label_len);
+            *(inverse_domain + strlen(domain) - inverse_domain_offset - 1) = '.';
+            inverse_domain_offset += 1;
+            label_len = 0;
+        }
+        else
+        {
+            label_len++;
+        }
+
+        tmp_domain++;
+    }
+
+    if (label_len != 0)
+    {
+        inverse_domain_offset += label_len;
+        strncpy(inverse_domain + strlen(domain) - inverse_domain_offset, tmp_domain - label_len, label_len);
+    }
+
+    strncpy(inverse_domain + strlen(domain), inverse_domain_suffix, strlen(inverse_domain_suffix));
+    *(inverse_domain + strlen(domain) + strlen(inverse_domain_suffix)) = '\0';
+
+    str_to_qname_value(inverse_domain, buf + 12);
+    size_t question_len = strlen(inverse_domain) + 2;
+
+    uint16_t qtype_question_type = 12;
+    uint16_t qclass_question_class = 1;
+
+    buf[12 + question_len] = (uint8_t)(qtype_question_type >> 8);
+    buf[13 + question_len] = (uint8_t)(qtype_question_type & 0xff);
+    buf[14 + question_len] = (uint8_t)(qclass_question_class >> 8);
+    buf[15 + question_len] = (uint8_t)(qclass_question_class & 0xff);
+
+    *dns_query_size = 16 + question_len;
 }
 
 void build_dns_query(char *domain, uint8_t *buf, size_t *dns_query_size)
@@ -313,6 +406,16 @@ void build_dns_query(char *domain, uint8_t *buf, size_t *dns_query_size)
     *dns_query_size = 16 + question_len;
 }
 
+enum resolver_input_type get_resolver_input_type(char *input)
+{
+    if (input == "142.250.109.136")
+    {
+        return ipv4;
+    }
+
+    return domain;
+}
+
 int main(int argc, char **argv)
 {
     int fd;
@@ -340,10 +443,19 @@ int main(int argc, char **argv)
     }
 
     uint8_t buf[4096] = {0};
-    char *host = "d3js.org";
+    char *host = "142.250.109.136";
+
+    enum resolver_input_type input_type = get_resolver_input_type(host);
 
     size_t dns_query_size = 0;
-    build_dns_query(host, buf, &dns_query_size);
+    if (input_type == domain)
+    {
+        build_dns_query(host, buf, &dns_query_size);
+    }
+    else
+    {
+        build_dns_inverse_query(host, buf, &dns_query_size);
+    }
 
     if (send(fd, buf, dns_query_size, 0) == -1)
     {
