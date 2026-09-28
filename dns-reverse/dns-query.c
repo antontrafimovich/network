@@ -316,8 +316,6 @@ void build_dns_inverse_query(char *domain, uint8_t *buf, size_t *dns_query_size)
     const char *inverse_domain_suffix = ".in-addr.arpa";
     char *inverse_domain = malloc(strlen(domain) + strlen(inverse_domain_suffix) + 1);
 
-    size_t i;
-
     char *tmp_domain = domain;
     size_t label_len = 0;
     size_t inverse_domain_offset = 0;
@@ -351,6 +349,8 @@ void build_dns_inverse_query(char *domain, uint8_t *buf, size_t *dns_query_size)
 
     str_to_qname_value(inverse_domain, buf + 12);
     size_t question_len = strlen(inverse_domain) + 2;
+
+    free(inverse_domain);
 
     uint16_t qtype_question_type = 12;
     uint16_t qclass_question_class = 1;
@@ -448,13 +448,13 @@ int main(int argc, char **argv)
     enum resolver_input_type input_type = get_resolver_input_type(host);
 
     size_t dns_query_size = 0;
-    if (input_type == domain)
+    if (strncmp(argv[1], "-x", 2) == 0)
     {
-        build_dns_query(host, buf, &dns_query_size);
+        build_dns_inverse_query(argv[2], buf, &dns_query_size);
     }
     else
     {
-        build_dns_inverse_query(host, buf, &dns_query_size);
+        build_dns_query(argv[1], buf, &dns_query_size);
     }
 
     if (send(fd, buf, dns_query_size, 0) == -1)
