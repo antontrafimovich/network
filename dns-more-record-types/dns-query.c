@@ -105,6 +105,76 @@ void str_to_qname_value(char *str, char *buf)
     *buf = 0;
 }
 
+void dns_class_to_string(uint16_t class, char *class_str)
+{
+    switch (class)
+    {
+    case 1:
+        *class_str = "IN_INTERNET";
+        break;
+    case 2:
+        *class_str = "CS_CSNET_OBSOLETE";
+        break;
+    case 3:
+        *class_str = "CH_CHAOS";
+        break;
+    case 4:
+        *class_str = "IN_HESIOD";
+        break;
+
+    default:
+        *class_str = "IN_INTERNET";
+        break;
+    }
+}
+
+void dns_type_to_string(uint16_t type, char *type_str)
+{
+    switch (type)
+    {
+    case 1:
+        strncpy(type_str, "A_IPV4", strlen("A_IPV4"));
+        break;
+    case 2:
+        *type_str = "NS_AUTHORITATIVE_NAME_SERVER";
+        break;
+    case 3:
+        *type_str = "MD_MAIL_DESTINATION_OBSOLETE";
+        break;
+    case 5:
+        *type_str = "CNAME_CANONICAL_NAME";
+        break;
+    case 6:
+        *type_str = "SOA_START_OF_AUTHORITY";
+        break;
+    case 11:
+        *type_str = "WSK_WELL_KNOWN_SERVICE_DESCRIPTION";
+        break;
+    case 12:
+        *type_str = "PTR_DOMAIN_NAME_POINTER";
+        break;
+    case 13:
+        *type_str = "HINFO_HOST_INFORMATION";
+        break;
+    case 14:
+        *type_str = "MINFO_MAILBOX_OR_MAIL_LIST_INFORMATION";
+        break;
+    case 15:
+        *type_str = "MX_MAIL_EXCHANGE";
+        break;
+    case 16:
+        *type_str = "TXT_TEXT_STRINGs";
+        break;
+    case 28:
+        *type_str = "AAAA_IPV6";
+        break;
+
+    default:
+        *type_str = "A_IPV4";
+        break;
+    }
+}
+
 int dns_name_to_string(uint8_t *dns_section_record_start, char *name, uint8_t *dns_response_start, size_t *dns_name_length)
 {
     uint8_t *dns_section_record_start_p = dns_section_record_start;
@@ -138,6 +208,23 @@ int dns_name_to_string(uint8_t *dns_section_record_start, char *name, uint8_t *d
     *name = '\0';
 
     return 0;
+}
+
+void dns_name_to_ipv6_string(uint8_t *dns_section_record_start, char *name, uint8_t *dns_response_start, size_t *dns_name_length)
+{
+    uint8_t *dns_section_record_start_p = dns_section_record_start;
+    size_t length = (size_t)*(dns_section_record_start_p++);
+
+    size_t i;
+    for (i = 0; i < length; i++)
+    {
+        snprintf(name++, 1, "%x", *dns_section_record_start_p++);
+
+        if (i % 2 == 1 && i != length - 1)
+        {
+            *name++ = ':';
+        }
+    }
 }
 
 int parse_dns_question_entry(struct domain_message_question *question, uint8_t *dns_response, size_t question_entry_offset, size_t *question_length)
@@ -260,7 +347,14 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
     for (k = 0; k < domain_message_answer.ancount_answer_section_entries_number; k++)
     {
         struct domain_message_answer aw = domain_message_answer.answers[k];
-        printf("%s: ", aw.name);
+
+        char dns_type_str[128];
+        dns_type_to_string(aw.type, dns_type_str);
+
+        char dns_class_str[128];
+        dns_class_to_string(aw.class, dns_class_str);
+
+        printf("%s:    %s    %s ", aw.name, dns_type_str, dns_class_str);
 
         if (aw.type == 1)
         {
@@ -270,21 +364,19 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
                 printf(l == aw.rdlength - 1 ? "%d\n" : "%d.", aw.rdata[l]);
             }
         }
-
-        if (aw.type == 2)
+        else if (aw.type == 28)
         {
-            char authoritatve_name_server[64];
-            dns_name_to_string(aw.rdata, authoritatve_name_server, dns_response, NULL);
+            char dns_answer_ipv6_value[24];
+            dns_name_to_ipv6_string(aw.rdata, dns_answer_ipv6_value, dns_response, NULL);
 
-            printf("%s\n", authoritatve_name_server);
+            printf("%s\n", dns_answer_ipv6_value);
         }
-
-        if (aw.type == 12)
+        else
         {
-            char pointer_value[64];
-            dns_name_to_string(aw.rdata, pointer_value, dns_response, NULL);
+            char dns_answer_text_value[256];
+            dns_name_to_string(aw.rdata, dns_answer_text_value, dns_response, NULL);
 
-            printf("%s\n", pointer_value);
+            printf("%s\n", dns_answer_text_value);
         }
     }
 
@@ -293,6 +385,8 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
 
 void build_dns_inverse_query(char *domain, uint8_t *buf, size_t *dns_query_size)
 {
+    const uint16_t QTYPE_PTR = 12;
+
     uint16_t id = 0x1f2f;
     uint8_t qr_query_or_response = 0;
     uint8_t opcode_operation_code = 0;
@@ -359,7 +453,7 @@ void build_dns_inverse_query(char *domain, uint8_t *buf, size_t *dns_query_size)
 
     free(inverse_domain);
 
-    uint16_t qtype_question_type = 12;
+    uint16_t qtype_question_type = QTYPE_PTR;
     uint16_t qclass_question_class = 1;
 
     buf[12 + question_len] = (uint8_t)(qtype_question_type >> 8);
@@ -370,7 +464,7 @@ void build_dns_inverse_query(char *domain, uint8_t *buf, size_t *dns_query_size)
     *dns_query_size = 16 + question_len;
 }
 
-void build_dns_query(char *domain, uint8_t *buf, size_t *dns_query_size)
+void build_dns_query(char *domain, uint8_t qtype, uint8_t *buf, size_t *dns_query_size)
 {
     uint16_t id = 0x1f2f;
     uint8_t qr_query_or_response = 0;
@@ -402,7 +496,7 @@ void build_dns_query(char *domain, uint8_t *buf, size_t *dns_query_size)
     str_to_qname_value(domain, buf + 12);
     size_t question_len = strlen(domain) + 2;
 
-    uint16_t qtype_question_type = 2;
+    uint16_t qtype_question_type = (uint16_t)qtype;
     uint16_t qclass_question_class = 1;
 
     buf[12 + question_len] = (uint8_t)(qtype_question_type >> 8);
@@ -420,6 +514,9 @@ int parse_args(int argc, char **argv, struct dns_client_args *args)
     {
         args->reverse = 1;
         strncpy(args->value, argv[2], strlen(argv[2]));
+        args->qtype = 12;
+
+        return 0;
     }
     else
     {
@@ -427,19 +524,23 @@ int parse_args(int argc, char **argv, struct dns_client_args *args)
         strncpy(args->value, argv[1], strlen(argv[1]));
     }
 
-    args->qtype = 1;
+    const size_t arg_qtype_length = strlen(argv[2]);
 
-    return 0;
-}
-
-enum resolver_input_type get_resolver_input_type(char *input)
-{
-    if (input == "142.250.109.136")
+    if (strncmp(argv[2], "TXT", arg_qtype_length) == 0)
     {
-        return ipv4;
+
+        args->qtype = 16;
+    }
+    else if (strncmp(argv[2], "AAAA", arg_qtype_length) == 0)
+    {
+        args->qtype = 28;
+    }
+    else
+    {
+        args->qtype = 1;
     }
 
-    return domain;
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -479,7 +580,7 @@ int main(int argc, char **argv)
     }
     else
     {
-        build_dns_query(args.value, buf, &dns_query_size);
+        build_dns_query(args.value, args.qtype, buf, &dns_query_size);
     }
 
     if (send(fd, buf, dns_query_size, 0) == -1)
