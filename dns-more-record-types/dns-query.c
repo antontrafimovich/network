@@ -110,20 +110,20 @@ void dns_class_to_string(uint16_t class, char *class_str)
     switch (class)
     {
     case 1:
-        *class_str = "IN_INTERNET";
+        strncpy(class_str, "IN_INTERNET", strlen("IN_INTERNET") + 1);
         break;
     case 2:
-        *class_str = "CS_CSNET_OBSOLETE";
+        strncpy(class_str, "CS_CSNET_OBSOLETE", strlen("CS_CSNET_OBSOLETE") + 1);
         break;
     case 3:
-        *class_str = "CH_CHAOS";
+        strncpy(class_str, "CH_CHAOS", strlen("CH_CHAOS") + 1);
         break;
     case 4:
-        *class_str = "IN_HESIOD";
+        strncpy(class_str, "IN_HESIOD", strlen("IN_HESIOD") + 1);
         break;
 
     default:
-        *class_str = "IN_INTERNET";
+        strncpy(class_str, "IN_INTERNET", strlen("IN_INTERNET") + 1);
         break;
     }
 }
@@ -133,44 +133,44 @@ void dns_type_to_string(uint16_t type, char *type_str)
     switch (type)
     {
     case 1:
-        strncpy(type_str, "A_IPV4", strlen("A_IPV4"));
+        strncpy(type_str, "A_IPV4", strlen("A_IPV4") + 1);
         break;
     case 2:
-        *type_str = "NS_AUTHORITATIVE_NAME_SERVER";
+        strncpy(type_str, "NS_AUTHORITATIVE_NAME_SERVER", strlen("NS_AUTHORITATIVE_NAME_SERVER") + 1);
         break;
     case 3:
-        *type_str = "MD_MAIL_DESTINATION_OBSOLETE";
+        strncpy(type_str, "MD_MAIL_DESTINATION_OBSOLETE", strlen("MD_MAIL_DESTINATION_OBSOLETE") + 1);
         break;
     case 5:
-        *type_str = "CNAME_CANONICAL_NAME";
+        strncpy(type_str, "CNAME_CANONICAL_NAME", strlen("CNAME_CANONICAL_NAME") + 1);
         break;
     case 6:
-        *type_str = "SOA_START_OF_AUTHORITY";
+        strncpy(type_str, "SOA_START_OF_AUTHORITY", strlen("SOA_START_OF_AUTHORITY") + 1);
         break;
     case 11:
-        *type_str = "WSK_WELL_KNOWN_SERVICE_DESCRIPTION";
+        strncpy(type_str, "WSK_WELL_KNOWN_SERVICE_DESCRIPTION", strlen("WSK_WELL_KNOWN_SERVICE_DESCRIPTION") + 1);
         break;
     case 12:
-        *type_str = "PTR_DOMAIN_NAME_POINTER";
+        strncpy(type_str, "PTR_DOMAIN_NAME_POINTER", strlen("PTR_DOMAIN_NAME_POINTER") + 1);
         break;
     case 13:
-        *type_str = "HINFO_HOST_INFORMATION";
+        strncpy(type_str, "HINFO_HOST_INFORMATION", strlen("HINFO_HOST_INFORMATION") + 1);
         break;
     case 14:
-        *type_str = "MINFO_MAILBOX_OR_MAIL_LIST_INFORMATION";
+        strncpy(type_str, "MINFO_MAILBOX_OR_MAIL_LIST_INFORMATION", strlen("MINFO_MAILBOX_OR_MAIL_LIST_INFORMATION") + 1);
         break;
     case 15:
-        *type_str = "MX_MAIL_EXCHANGE";
+        strncpy(type_str, "MX_MAIL_EXCHANGE", strlen("MX_MAIL_EXCHANGE") + 1);
         break;
     case 16:
-        *type_str = "TXT_TEXT_STRINGs";
+        strncpy(type_str, "TXT_TEXT_STRINGs", strlen("TXT_TEXT_STRINGs") + 1);
         break;
     case 28:
-        *type_str = "AAAA_IPV6";
+        strncpy(type_str, "AAAA_IPV6", strlen("AAAA_IPV6") + 1);
         break;
 
     default:
-        *type_str = "A_IPV4";
+        strncpy(type_str, "A_IPV4", strlen("A_IPV4") + 1);
         break;
     }
 }
@@ -213,12 +213,28 @@ int dns_name_to_string(uint8_t *dns_section_record_start, char *name, uint8_t *d
 void dns_name_to_ipv6_string(uint8_t *dns_section_record_start, char *name, uint8_t *dns_response_start, size_t *dns_name_length)
 {
     uint8_t *dns_section_record_start_p = dns_section_record_start;
-    size_t length = (size_t)*(dns_section_record_start_p++);
+    size_t length = 16;
+    char tmp[3];
 
     size_t i;
     for (i = 0; i < length; i++)
     {
-        snprintf(name++, 1, "%x", *dns_section_record_start_p++);
+        int result = snprintf(tmp, 3, "%x", *(dns_section_record_start_p++));
+        if (result == 2)
+        {
+            *name++ = tmp[0];
+            *name++ = tmp[1];
+        }
+        else if (result == 1)
+        {
+            *name++ = '0';
+            *name++ = tmp[0];
+        }
+        else
+        {
+            *name++ = '0';
+            *name++ = '0';
+        }
 
         if (i % 2 == 1 && i != length - 1)
         {
@@ -354,7 +370,7 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
         char dns_class_str[128];
         dns_class_to_string(aw.class, dns_class_str);
 
-        printf("%s:    %s    %s ", aw.name, dns_type_str, dns_class_str);
+        printf("%s:    %s    %s    ", aw.name, dns_type_str, dns_class_str);
 
         if (aw.type == 1)
         {
