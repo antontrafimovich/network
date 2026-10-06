@@ -214,33 +214,26 @@ void dns_name_to_ipv6_string(uint8_t *dns_section_record_start, char *name, uint
 {
     uint8_t *dns_section_record_start_p = dns_section_record_start;
     size_t length = 16;
-    char tmp[3];
+    char tmp[5];
 
     size_t i;
-    for (i = 0; i < length; i++)
+    for (i = 0; i < length; i += 2)
     {
-        int result = snprintf(tmp, 3, "%x", *(dns_section_record_start_p++));
-        if (result == 2)
+        int result = snprintf(tmp, 5, "%x", (uint16_t)(dns_section_record_start_p[i] << 8) | (uint16_t)(dns_section_record_start_p[i + 1]));
+
+        size_t j;
+        for (j = 0; j < result; j++)
         {
-            *name++ = tmp[0];
-            *name++ = tmp[1];
-        }
-        else if (result == 1)
-        {
-            *name++ = '0';
-            *name++ = tmp[0];
-        }
-        else
-        {
-            *name++ = '0';
-            *name++ = '0';
+            *name++ = tmp[j];
         }
 
-        if (i % 2 == 1 && i != length - 1)
+        if (i + 2 < length)
         {
             *name++ = ':';
         }
     }
+
+    *name = 0;
 }
 
 int parse_dns_question_entry(struct domain_message_question *question, uint8_t *dns_response, size_t question_entry_offset, size_t *question_length)
@@ -382,7 +375,7 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
         }
         else if (aw.type == 28)
         {
-            char dns_answer_ipv6_value[24];
+            char dns_answer_ipv6_value[64];
             dns_name_to_ipv6_string(aw.rdata, dns_answer_ipv6_value, dns_response, NULL);
 
             printf("%s\n", dns_answer_ipv6_value);
