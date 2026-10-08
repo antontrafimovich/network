@@ -106,9 +106,9 @@ void str_to_qname_value(char *str, char *buf)
     *buf = 0;
 }
 
-void dns_class_to_string(uint16_t class, char *class_str)
+void dns_class_value_to_string(uint16_t class_value, char *class_str)
 {
-    switch (class)
+    switch (class_value)
     {
     case 1:
         strncpy(class_str, "IN_INTERNET", strlen("IN_INTERNET") + 1);
@@ -129,9 +129,9 @@ void dns_class_to_string(uint16_t class, char *class_str)
     }
 }
 
-void dns_type_to_string(uint16_t type, char *type_str)
+void dns_type_value_to_string(uint16_t type_value, char *type_str)
 {
-    switch (type)
+    switch (type_value)
     {
     case 1:
         strncpy(type_str, "A_IPV4", strlen("A_IPV4") + 1);
@@ -176,9 +176,9 @@ void dns_type_to_string(uint16_t type, char *type_str)
     }
 }
 
-int dns_name_to_string(uint8_t *dns_section_record_start, char *name, uint8_t *dns_response_start, size_t *dns_name_length)
+int domain_name_labels_to_string(uint8_t *domain_name_labels_start, char *name, uint8_t *dns_response_start, size_t *domain_name_labels_length)
 {
-    uint8_t *dns_section_record_start_p = dns_section_record_start;
+    uint8_t *dns_section_record_start_p = domain_name_labels_start;
 
     while (*dns_section_record_start_p != 0)
     {
@@ -189,7 +189,7 @@ int dns_name_to_string(uint8_t *dns_section_record_start, char *name, uint8_t *d
         else if (ISCOMPRESSED(*dns_section_record_start_p))
         {
             size_t decompressed_name_length = 0;
-            dns_name_to_string(dns_response_start + COMPRESSEDTOOFFSET(dns_section_record_start_p[0], dns_section_record_start_p[1]), name, dns_response_start, &decompressed_name_length);
+            domain_name_labels_to_string(dns_response_start + COMPRESSEDTOOFFSET(dns_section_record_start_p[0], dns_section_record_start_p[1]), name, dns_response_start, &decompressed_name_length);
             name += decompressed_name_length;
             dns_section_record_start_p += 1;
             break;
@@ -201,9 +201,9 @@ int dns_name_to_string(uint8_t *dns_section_record_start, char *name, uint8_t *d
         }
     }
 
-    if (dns_name_length != NULL)
+    if (domain_name_labels_length != NULL)
     {
-        *dns_name_length = dns_section_record_start_p - dns_section_record_start + 1;
+        *domain_name_labels_length = dns_section_record_start_p - domain_name_labels_start + 1;
     }
 
     *name = '\0';
@@ -236,7 +236,7 @@ int parse_dns_question_entry(struct domain_message_question *question, uint8_t *
     uint8_t *dns_question_section_p = dns_response + question_entry_offset;
 
     size_t dns_name_length = 0;
-    dns_name_to_string(dns_question_section_p, question->name, dns_response, &dns_name_length);
+    domain_name_labels_to_string(dns_question_section_p, question->name, dns_response, &dns_name_length);
     dns_question_section_p += dns_name_length;
 
     question->type = (uint16_t)((dns_question_section_p[0] << 8) | dns_question_section_p[1]);
@@ -255,7 +255,7 @@ int parse_dns_answer_entry(struct domain_message_answer *answer, uint8_t *dns_re
     uint8_t *dns_answer_section_p = dns_response + answer_entry_offset;
 
     size_t dns_name_length = 0;
-    dns_name_to_string(dns_answer_section_p, answer->name, dns_response, &dns_name_length);
+    domain_name_labels_to_string(dns_answer_section_p, answer->name, dns_response, &dns_name_length);
     dns_answer_section_p += dns_name_length;
 
     answer->type = (uint16_t)((dns_answer_section_p[0] << 8) | dns_answer_section_p[1]);
@@ -294,11 +294,11 @@ void dns_answer_to_soa_string(char *response_str, uint8_t *rdata_section_start, 
     uint32_t minimum_ttl_field_exported_with_any_rr;
 
     size_t mname_length;
-    dns_name_to_string(rdata_section_start, mname_authoritative_name_server_for_zone, dns_response, &mname_length);
+    domain_name_labels_to_string(rdata_section_start, mname_authoritative_name_server_for_zone, dns_response, &mname_length);
     rdata_section_start += mname_length;
 
     size_t rname_length;
-    dns_name_to_string(rdata_section_start, rname_mailbox_responsible_for_zone, dns_response, &rname_length);
+    domain_name_labels_to_string(rdata_section_start, rname_mailbox_responsible_for_zone, dns_response, &rname_length);
     rdata_section_start += rname_length;
 
     serial_version_number_of_zone = (uint32_t)(rdata_section_start[0] << 24) | (uint32_t)(rdata_section_start[1] << 16) | (uint32_t)(rdata_section_start[2] << 8) | (uint32_t)rdata_section_start[3];
@@ -407,10 +407,10 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
         struct domain_message_answer aw = domain_message_answer.answers[k];
 
         char dns_type_str[128];
-        dns_type_to_string(aw.type, dns_type_str);
+        dns_type_value_to_string(aw.type, dns_type_str);
 
         char dns_class_str[128];
-        dns_class_to_string(aw.class, dns_class_str);
+        dns_class_value_to_string(aw.class, dns_class_str);
 
         printf("%s:    %s    %s    ", aw.name, dns_type_str, dns_class_str);
 
@@ -439,7 +439,7 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
         else
         {
             char dns_answer_text_value[256];
-            dns_name_to_string(aw.rdata, dns_answer_text_value, dns_response, NULL);
+            domain_name_labels_to_string(aw.rdata, dns_answer_text_value, dns_response, NULL);
 
             printf("%s\n", dns_answer_text_value);
         }
@@ -452,10 +452,10 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
         struct domain_message_answer au = domain_message_answer.authorities[l];
 
         char dns_type_str[128];
-        dns_type_to_string(au.type, dns_type_str);
+        dns_type_value_to_string(au.type, dns_type_str);
 
         char dns_class_str[128];
-        dns_class_to_string(au.class, dns_class_str);
+        dns_class_value_to_string(au.class, dns_class_str);
 
         printf("%s:    %s    %s    ", au.name, dns_type_str, dns_class_str);
 
@@ -484,7 +484,7 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
         else
         {
             char dns_answer_text_value[256];
-            dns_name_to_string(au.rdata, dns_answer_text_value, dns_response, NULL);
+            domain_name_labels_to_string(au.rdata, dns_answer_text_value, dns_response, NULL);
 
             printf("%s\n", dns_answer_text_value);
         }
