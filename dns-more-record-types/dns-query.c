@@ -69,6 +69,7 @@ struct domain_message
     uint16_t arcount_additinal_section_entries_number;
     struct domain_message_question *questions;
     struct domain_message_answer *answers;
+    struct domain_message_answer *authorities;
 };
 
 void print_byte_binary(unsigned char byte)
@@ -290,6 +291,7 @@ void dns_answer_to_soa_string(char *response_str, uint8_t *rdata_section_start, 
     uint32_t refresh_time_interval_before_refresh;
     uint32_t retry_time_interval_elapse_before_retry_on_fail;
     uint32_t expire_upper_time_limit_before_zone_no_authoritative;
+    uint32_t minimum_ttl_field_exported_with_any_rr;
 
     size_t mname_length;
     dns_name_to_string(rdata_section_start, mname_authoritative_name_server_for_zone, dns_response, &mname_length);
@@ -311,7 +313,10 @@ void dns_answer_to_soa_string(char *response_str, uint8_t *rdata_section_start, 
     expire_upper_time_limit_before_zone_no_authoritative = (uint32_t)(rdata_section_start[0] << 24) | (uint32_t)(rdata_section_start[1] << 16) | (uint32_t)(rdata_section_start[2] << 8) | (uint32_t)rdata_section_start[3];
     rdata_section_start += 4;
 
-    snprintf(response_str, 512, "%s  %s  %d  %d  %d  %d", mname_authoritative_name_server_for_zone, rname_mailbox_responsible_for_zone, serial_version_number_of_zone, refresh_time_interval_before_refresh, retry_time_interval_elapse_before_retry_on_fail, expire_upper_time_limit_before_zone_no_authoritative);
+    minimum_ttl_field_exported_with_any_rr = (uint32_t)(rdata_section_start[0] << 24) | (uint32_t)(rdata_section_start[1] << 16) | (uint32_t)(rdata_section_start[2] << 8) | (uint32_t)rdata_section_start[3];
+    rdata_section_start += 4;
+
+    snprintf(response_str, 512, "%s  %s  %d  %d  %d  %d %d", mname_authoritative_name_server_for_zone, rname_mailbox_responsible_for_zone, serial_version_number_of_zone, refresh_time_interval_before_refresh, retry_time_interval_elapse_before_retry_on_fail, expire_upper_time_limit_before_zone_no_authoritative, minimum_ttl_field_exported_with_any_rr);
 }
 
 int dns_response_to_user_friendly(uint8_t *dns_response)
@@ -381,6 +386,21 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
         j++;
     }
 
+    domain_message_answer.authorities = malloc(sizeof(struct domain_message_answer) * domain_message_answer.nscount_authority_section_entries_number);
+
+    size_t m = 0;
+    size_t authority_length = 0;
+    size_t authority_entry_offset = dns_response_p - dns_response;
+
+    while (m < domain_message_answer.nscount_authority_section_entries_number)
+    {
+        parse_dns_answer_entry(&domain_message_answer.authorities[m], dns_response, authority_entry_offset, &authority_length);
+        authority_entry_offset += authority_length;
+        dns_response_p += authority_length;
+        m++;
+    }
+
+    printf("ANSWER SECTION:\n\n");
     size_t k;
     for (k = 0; k < domain_message_answer.ancount_answer_section_entries_number; k++)
     {
@@ -420,6 +440,51 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
         {
             char dns_answer_text_value[256];
             dns_name_to_string(aw.rdata, dns_answer_text_value, dns_response, NULL);
+
+            printf("%s\n", dns_answer_text_value);
+        }
+    }
+
+    printf("AUTHORITY SECTION:\n\n");
+    size_t l;
+    for (l = 0; l < domain_message_answer.nscount_authority_section_entries_number; l++)
+    {
+        struct domain_message_answer au = domain_message_answer.authorities[l];
+
+        char dns_type_str[128];
+        dns_type_to_string(au.type, dns_type_str);
+
+        char dns_class_str[128];
+        dns_class_to_string(au.class, dns_class_str);
+
+        printf("%s:    %s    %s    ", au.name, dns_type_str, dns_class_str);
+
+        if (au.type == 1)
+        {
+            size_t l;
+            for (l = 0; l < au.rdlength; l++)
+            {
+                printf(l == au.rdlength - 1 ? "%d\n" : "%d.", au.rdata[l]);
+            }
+        }
+        else if (au.type == 28)
+        {
+            char dns_answer_ipv6_value[64];
+            dns_name_to_ipv6_string(au.rdata, dns_answer_ipv6_value, dns_response, NULL);
+
+            printf("%s\n", dns_answer_ipv6_value);
+        }
+        else if (au.type == 6)
+        {
+            char dns_answer_soa_value[512];
+            dns_answer_to_soa_string(dns_answer_soa_value, au.rdata, au.rdlength, dns_response);
+
+            printf("%s\n", dns_answer_soa_value);
+        }
+        else
+        {
+            char dns_answer_text_value[256];
+            dns_name_to_string(au.rdata, dns_answer_text_value, dns_response, NULL);
 
             printf("%s\n", dns_answer_text_value);
         }
@@ -583,6 +648,10 @@ int parse_args(int argc, char **argv, struct dns_client_args *args)
     else if (strncmp(argv[2], "NS", arg_qtype_length) == 0)
     {
         args->qtype = 2;
+    }
+    else if (strncmp(argv[2], "PTR", arg_qtype_length) == 0)
+    {
+        args->qtype = 12;
     }
     else if (strncmp(argv[2], "SOA", arg_qtype_length) == 0)
     {
