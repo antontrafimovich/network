@@ -212,20 +212,14 @@ int dns_name_to_string(uint8_t *dns_section_record_start, char *name, uint8_t *d
 
 void dns_name_to_ipv6_string(uint8_t *dns_section_record_start, char *name, uint8_t *dns_response_start, size_t *dns_name_length)
 {
-    uint8_t *dns_section_record_start_p = dns_section_record_start;
     size_t length = 16;
     char tmp[5];
 
     size_t i;
     for (i = 0; i < length; i += 2)
     {
-        int result = snprintf(tmp, 5, "%x", (uint16_t)(dns_section_record_start_p[i] << 8) | (uint16_t)(dns_section_record_start_p[i + 1]));
-
-        size_t j;
-        for (j = 0; j < result; j++)
-        {
-            *name++ = tmp[j];
-        }
+        int result = snprintf(name, 5, "%x", (uint16_t)(dns_section_record_start[i] << 8) | (uint16_t)(dns_section_record_start[i + 1]));
+        name += result;
 
         if (i + 2 < length)
         {
@@ -283,6 +277,41 @@ int parse_dns_answer_entry(struct domain_message_answer *answer, uint8_t *dns_re
     *answer_length = dns_answer_section_p - dns_response - answer_entry_offset;
 
     return 0;
+}
+
+void dns_answer_to_soa_string(char *response_str, uint8_t *rdata_section_start, size_t rdata_section_size, uint8_t *dns_response)
+{
+    size_t i = 0;
+
+    char mname_authoritative_name_server_for_zone[64];
+    char rname_mailbox_responsible_for_zone[128];
+
+    uint32_t serial_version_number_of_zone;
+    uint32_t refresh_time_interval_before_refresh;
+    uint32_t retry_time_interval_elapse_before_retry_on_fail;
+    uint32_t expire_upper_time_limit_before_zone_no_authoritative;
+
+    size_t mname_length;
+    dns_name_to_string(rdata_section_start, mname_authoritative_name_server_for_zone, dns_response, &mname_length);
+    rdata_section_start += mname_length;
+
+    size_t rname_length;
+    dns_name_to_string(rdata_section_start, rname_mailbox_responsible_for_zone, dns_response, &rname_length);
+    rdata_section_start += rname_length;
+
+    serial_version_number_of_zone = (uint32_t)(rdata_section_start[0] << 24) | (uint32_t)(rdata_section_start[1] << 16) | (uint32_t)(rdata_section_start[2] << 8) | (uint32_t)rdata_section_start[3];
+    rdata_section_start += 4;
+
+    refresh_time_interval_before_refresh = (uint32_t)(rdata_section_start[0] << 24) | (uint32_t)(rdata_section_start[1] << 16) | (uint32_t)(rdata_section_start[2] << 8) | (uint32_t)rdata_section_start[3];
+    rdata_section_start += 4;
+
+    retry_time_interval_elapse_before_retry_on_fail = (uint32_t)(rdata_section_start[0] << 24) | (uint32_t)(rdata_section_start[1] << 16) | (uint32_t)(rdata_section_start[2] << 8) | (uint32_t)rdata_section_start[3];
+    rdata_section_start += 4;
+
+    expire_upper_time_limit_before_zone_no_authoritative = (uint32_t)(rdata_section_start[0] << 24) | (uint32_t)(rdata_section_start[1] << 16) | (uint32_t)(rdata_section_start[2] << 8) | (uint32_t)rdata_section_start[3];
+    rdata_section_start += 4;
+
+    snprintf(response_str, 512, "%s  %s  %d  %d  %d  %d", mname_authoritative_name_server_for_zone, rname_mailbox_responsible_for_zone, serial_version_number_of_zone, refresh_time_interval_before_refresh, retry_time_interval_elapse_before_retry_on_fail, expire_upper_time_limit_before_zone_no_authoritative);
 }
 
 int dns_response_to_user_friendly(uint8_t *dns_response)
@@ -379,6 +408,13 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
             dns_name_to_ipv6_string(aw.rdata, dns_answer_ipv6_value, dns_response, NULL);
 
             printf("%s\n", dns_answer_ipv6_value);
+        }
+        else if (aw.type == 6)
+        {
+            char dns_answer_soa_value[512];
+            dns_answer_to_soa_string(dns_answer_soa_value, aw.rdata, aw.rdlength, dns_response);
+
+            printf("%s\n", dns_answer_soa_value);
         }
         else
         {
@@ -543,6 +579,14 @@ int parse_args(int argc, char **argv, struct dns_client_args *args)
     else if (strncmp(argv[2], "AAAA", arg_qtype_length) == 0)
     {
         args->qtype = 28;
+    }
+    else if (strncmp(argv[2], "NS", arg_qtype_length) == 0)
+    {
+        args->qtype = 2;
+    }
+    else if (strncmp(argv[2], "SOA", arg_qtype_length) == 0)
+    {
+        args->qtype = 6;
     }
     else
     {
