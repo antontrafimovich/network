@@ -178,35 +178,60 @@ void dns_type_value_to_string(uint16_t type_value, char *type_str)
 
 int domain_name_labels_to_string(uint8_t *domain_name_labels_start, char *name, uint8_t *dns_response_start, size_t *domain_name_labels_length)
 {
-    uint8_t *dns_section_record_start_p = domain_name_labels_start;
+    uint8_t *domain_name_labels_p = domain_name_labels_start;
+    uint8_t label_length = 0;
+    char *name_p = name;
 
-    while (*dns_section_record_start_p != 0)
+    while (*domain_name_labels_p != 0)
     {
-        if (ISALPHANUMERIC(*dns_section_record_start_p))
-        {
-            *name++ = *dns_section_record_start_p++;
-        }
-        else if (ISCOMPRESSED(*dns_section_record_start_p))
+        if (ISCOMPRESSED(*domain_name_labels_p))
         {
             size_t decompressed_name_length = 0;
-            domain_name_labels_to_string(dns_response_start + COMPRESSEDTOOFFSET(dns_section_record_start_p[0], dns_section_record_start_p[1]), name, dns_response_start, &decompressed_name_length);
-            name += decompressed_name_length;
-            dns_section_record_start_p += 1;
+            domain_name_labels_to_string(dns_response_start + COMPRESSEDTOOFFSET(domain_name_labels_p[0], domain_name_labels_p[1]), name_p, dns_response_start, &decompressed_name_length);
+            name_p += strlen(name_p);
+            domain_name_labels_p += 1;
             break;
         }
         else
         {
-            *name++ = '.';
-            dns_section_record_start_p++;
+            label_length = *(domain_name_labels_p++);
         }
+
+        while (label_length-- > 0)
+        {
+            *name_p++ = *domain_name_labels_p++;
+        }
+
+        *name_p++ = '.';
     }
 
-    if (domain_name_labels_length != NULL)
+    // while (*domain_name_labels_p != 0)
+    // {
+    //     if (ISALPHANUMERIC(*domain_name_labels_p))
+    //     {
+    //         *name++ = *domain_name_labels_p++;
+    //     }
+    //     else if (ISCOMPRESSED(*domain_name_labels_p))
+    //     {
+    //         size_t decompressed_name_length = 0;
+    //         domain_name_labels_to_string(dns_response_start + COMPRESSEDTOOFFSET(domain_name_labels_p[0], domain_name_labels_p[1]), name, dns_response_start, &decompressed_name_length);
+    //         name += decompressed_name_length;
+    //         domain_name_labels_p += 1;
+    //         break;
+    //     }
+    //     else
+    //     {
+    //         *name++ = '.';
+    //         domain_name_labels_p++;
+    //     }
+    // }
+
+    if (domain_name_labels_length != NULL && *domain_name_labels_length == 0)
     {
-        *domain_name_labels_length = dns_section_record_start_p - domain_name_labels_start + 1;
+        *domain_name_labels_length = domain_name_labels_p - domain_name_labels_start + 1;
     }
 
-    *name = '\0';
+    *name_p = '\0';
 
     return 0;
 }
@@ -293,15 +318,15 @@ void dns_answer_to_soa_string(char *response_str, uint8_t *rdata_section_start, 
     uint32_t expire_upper_time_limit_before_zone_no_authoritative;
     uint32_t minimum_ttl_field_exported_with_any_rr;
 
-    size_t mname_length;
+    size_t mname_length = 0;
     domain_name_labels_to_string(rdata_section_start, mname_authoritative_name_server_for_zone, dns_response, &mname_length);
     rdata_section_start += mname_length;
 
-    size_t rname_length;
+    size_t rname_length = 0;
     domain_name_labels_to_string(rdata_section_start, rname_mailbox_responsible_for_zone, dns_response, &rname_length);
     rdata_section_start += rname_length;
 
-    serial_version_number_of_zone = (uint32_t)(rdata_section_start[0] << 24) | (uint32_t)(rdata_section_start[1] << 16) | (uint32_t)(rdata_section_start[2] << 8) | (uint32_t)rdata_section_start[3];
+    serial_version_number_of_zone = ((uint32_t)rdata_section_start[0] << 24) | ((uint32_t)rdata_section_start[1] << 16) | ((uint32_t)rdata_section_start[2] << 8) | (uint32_t)rdata_section_start[3];
     rdata_section_start += 4;
 
     refresh_time_interval_before_refresh = (uint32_t)(rdata_section_start[0] << 24) | (uint32_t)(rdata_section_start[1] << 16) | (uint32_t)(rdata_section_start[2] << 8) | (uint32_t)rdata_section_start[3];
@@ -316,7 +341,7 @@ void dns_answer_to_soa_string(char *response_str, uint8_t *rdata_section_start, 
     minimum_ttl_field_exported_with_any_rr = (uint32_t)(rdata_section_start[0] << 24) | (uint32_t)(rdata_section_start[1] << 16) | (uint32_t)(rdata_section_start[2] << 8) | (uint32_t)rdata_section_start[3];
     rdata_section_start += 4;
 
-    snprintf(response_str, 512, "%s  %s  %d  %d  %d  %d %d", mname_authoritative_name_server_for_zone, rname_mailbox_responsible_for_zone, serial_version_number_of_zone, refresh_time_interval_before_refresh, retry_time_interval_elapse_before_retry_on_fail, expire_upper_time_limit_before_zone_no_authoritative, minimum_ttl_field_exported_with_any_rr);
+    snprintf(response_str, 512, "%s  %s  %u  %u  %u  %u %u", mname_authoritative_name_server_for_zone, rname_mailbox_responsible_for_zone, serial_version_number_of_zone, refresh_time_interval_before_refresh, retry_time_interval_elapse_before_retry_on_fail, expire_upper_time_limit_before_zone_no_authoritative, minimum_ttl_field_exported_with_any_rr);
 }
 
 int dns_response_to_user_friendly(uint8_t *dns_response)
@@ -444,6 +469,8 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
             printf("%s\n", dns_answer_text_value);
         }
     }
+
+    printf("\n");
 
     printf("AUTHORITY SECTION:\n\n");
     size_t l;
@@ -638,8 +665,11 @@ int parse_args(int argc, char **argv, struct dns_client_args *args)
 
     if (strncmp(argv[2], "TXT", arg_qtype_length) == 0)
     {
-
         args->qtype = 16;
+    }
+    else if (strncmp(argv[2], "A", arg_qtype_length) == 0)
+    {
+        args->qtype = 1;
     }
     else if (strncmp(argv[2], "AAAA", arg_qtype_length) == 0)
     {
