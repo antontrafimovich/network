@@ -106,73 +106,60 @@ void str_to_qname_value(char *str, char *buf)
     *buf = 0;
 }
 
-void dns_class_value_to_string(uint16_t class_value, char *class_str)
+char *dns_class_value_to_string(uint16_t class_value)
 {
     switch (class_value)
     {
     case 1:
-        strncpy(class_str, "IN_INTERNET", strlen("IN_INTERNET") + 1);
+        return "IN_INTERNET";
         break;
     case 2:
-        strncpy(class_str, "CS_CSNET_OBSOLETE", strlen("CS_CSNET_OBSOLETE") + 1);
+        return "CS_CSNET_OBSOLETE";
         break;
     case 3:
-        strncpy(class_str, "CH_CHAOS", strlen("CH_CHAOS") + 1);
+        return "CH_CHAOS";
         break;
     case 4:
-        strncpy(class_str, "IN_HESIOD", strlen("IN_HESIOD") + 1);
+        return "IN_HESIOD";
         break;
 
     default:
-        strncpy(class_str, "IN_INTERNET", strlen("IN_INTERNET") + 1);
+        return "IN_INTERNET";
         break;
     }
 }
 
-void dns_type_value_to_string(uint16_t type_value, char *type_str)
+char *dns_type_value_to_string(uint16_t type_value)
 {
     switch (type_value)
     {
     case 1:
-        strncpy(type_str, "A_IPV4", strlen("A_IPV4") + 1);
-        break;
+        return "A_IPV4";
     case 2:
-        strncpy(type_str, "NS_AUTHORITATIVE_NAME_SERVER", strlen("NS_AUTHORITATIVE_NAME_SERVER") + 1);
-        break;
+        return "NS_AUTHORITATIVE_NAME_SERVER";
     case 3:
-        strncpy(type_str, "MD_MAIL_DESTINATION_OBSOLETE", strlen("MD_MAIL_DESTINATION_OBSOLETE") + 1);
-        break;
+        return "MD_MAIL_DESTINATION_OBSOLETE";
     case 5:
-        strncpy(type_str, "CNAME_CANONICAL_NAME", strlen("CNAME_CANONICAL_NAME") + 1);
-        break;
+        return "CNAME_CANONICAL_NAME";
     case 6:
-        strncpy(type_str, "SOA_START_OF_AUTHORITY", strlen("SOA_START_OF_AUTHORITY") + 1);
-        break;
+        return "SOA_START_OF_AUTHORITY";
     case 11:
-        strncpy(type_str, "WSK_WELL_KNOWN_SERVICE_DESCRIPTION", strlen("WSK_WELL_KNOWN_SERVICE_DESCRIPTION") + 1);
-        break;
+        return "WSK_WELL_KNOWN_SERVICE_DESCRIPTION";
     case 12:
-        strncpy(type_str, "PTR_DOMAIN_NAME_POINTER", strlen("PTR_DOMAIN_NAME_POINTER") + 1);
-        break;
+        return "PTR_DOMAIN_NAME_POINTER";
     case 13:
-        strncpy(type_str, "HINFO_HOST_INFORMATION", strlen("HINFO_HOST_INFORMATION") + 1);
-        break;
+        return "HINFO_HOST_INFORMATION";
     case 14:
-        strncpy(type_str, "MINFO_MAILBOX_OR_MAIL_LIST_INFORMATION", strlen("MINFO_MAILBOX_OR_MAIL_LIST_INFORMATION") + 1);
-        break;
+        return "MINFO_MAILBOX_OR_MAIL_LIST_INFORMATION";
     case 15:
-        strncpy(type_str, "MX_MAIL_EXCHANGE", strlen("MX_MAIL_EXCHANGE") + 1);
-        break;
+        return "MX_MAIL_EXCHANGE";
     case 16:
-        strncpy(type_str, "TXT_TEXT_STRINGs", strlen("TXT_TEXT_STRINGs") + 1);
-        break;
+        return "TXT_TEXT_STRINGs";
     case 28:
-        strncpy(type_str, "AAAA_IPV6", strlen("AAAA_IPV6") + 1);
-        break;
+        return "AAAA_IPV6";
 
     default:
-        strncpy(type_str, "A_IPV4", strlen("A_IPV4") + 1);
-        break;
+        return "A_IPV4";
     }
 }
 
@@ -187,6 +174,9 @@ int domain_name_labels_to_string(uint8_t *domain_name_labels_start, char *name, 
         if (ISCOMPRESSED(*domain_name_labels_p))
         {
             size_t decompressed_name_length = 0;
+            if (domain_name_labels_p != dns_response_start + COMPRESSEDTOOFFSET(domain_name_labels_p[0], domain_name_labels_p[1]))
+            {
+            }
             domain_name_labels_to_string(dns_response_start + COMPRESSEDTOOFFSET(domain_name_labels_p[0], domain_name_labels_p[1]), name_p, dns_response_start, &decompressed_name_length);
             name_p += strlen(name_p);
             domain_name_labels_p += 1;
@@ -431,11 +421,9 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
     {
         struct domain_message_answer aw = domain_message_answer.answers[k];
 
-        char dns_type_str[128];
-        dns_type_value_to_string(aw.type, dns_type_str);
+        char *dns_type_str = dns_type_value_to_string(aw.type);
 
-        char dns_class_str[128];
-        dns_class_value_to_string(aw.class, dns_class_str);
+        char *dns_class_str = dns_class_value_to_string(aw.class);
 
         printf("%s:    %s    %s    ", aw.name, dns_type_str, dns_class_str);
 
@@ -478,11 +466,9 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
     {
         struct domain_message_answer au = domain_message_answer.authorities[l];
 
-        char dns_type_str[128];
-        dns_type_value_to_string(au.type, dns_type_str);
+        char *dns_type_str = dns_type_value_to_string(au.type);
 
-        char dns_class_str[128];
-        dns_class_value_to_string(au.class, dns_class_str);
+        char *dns_class_str = dns_class_value_to_string(au.class);
 
         printf("%s:    %s    %s    ", au.name, dns_type_str, dns_class_str);
 
