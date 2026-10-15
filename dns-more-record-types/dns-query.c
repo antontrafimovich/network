@@ -10,11 +10,13 @@
 
 #define ISCOMPRESSED(b) ((b >> 6) == 0x03)
 
-#define ISALPHANUMERIC(b) (b >= 40 && b <= 122)
-
 #define COMPRESSEDTOOFFSET(b, c) (((b & 0x3f) << 8) | c)
 
 #define HEADER_SIZE 12
+
+#define read_u32(p) (((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3])
+
+#define read_u16(p) (((uint16_t)p[0] << 8) | p[1])
 
 struct dns_client_args
 {
@@ -195,27 +197,6 @@ int domain_name_labels_to_string(uint8_t *domain_name_labels_start, char *name, 
         *name_p++ = '.';
     }
 
-    // while (*domain_name_labels_p != 0)
-    // {
-    //     if (ISALPHANUMERIC(*domain_name_labels_p))
-    //     {
-    //         *name++ = *domain_name_labels_p++;
-    //     }
-    //     else if (ISCOMPRESSED(*domain_name_labels_p))
-    //     {
-    //         size_t decompressed_name_length = 0;
-    //         domain_name_labels_to_string(dns_response_start + COMPRESSEDTOOFFSET(domain_name_labels_p[0], domain_name_labels_p[1]), name, dns_response_start, &decompressed_name_length);
-    //         name += decompressed_name_length;
-    //         domain_name_labels_p += 1;
-    //         break;
-    //     }
-    //     else
-    //     {
-    //         *name++ = '.';
-    //         domain_name_labels_p++;
-    //     }
-    // }
-
     if (domain_name_labels_length != NULL && *domain_name_labels_length == 0)
     {
         *domain_name_labels_length = domain_name_labels_p - domain_name_labels_start + 1;
@@ -316,19 +297,19 @@ void dns_answer_to_soa_string(char *response_str, uint8_t *rdata_section_start, 
     domain_name_labels_to_string(rdata_section_start, rname_mailbox_responsible_for_zone, dns_response, &rname_length);
     rdata_section_start += rname_length;
 
-    serial_version_number_of_zone = ((uint32_t)rdata_section_start[0] << 24) | ((uint32_t)rdata_section_start[1] << 16) | ((uint32_t)rdata_section_start[2] << 8) | (uint32_t)rdata_section_start[3];
+    serial_version_number_of_zone = read_u32(rdata_section_start);
     rdata_section_start += 4;
 
-    refresh_time_interval_before_refresh = (uint32_t)(rdata_section_start[0] << 24) | (uint32_t)(rdata_section_start[1] << 16) | (uint32_t)(rdata_section_start[2] << 8) | (uint32_t)rdata_section_start[3];
+    refresh_time_interval_before_refresh = read_u32(rdata_section_start);
     rdata_section_start += 4;
 
-    retry_time_interval_elapse_before_retry_on_fail = (uint32_t)(rdata_section_start[0] << 24) | (uint32_t)(rdata_section_start[1] << 16) | (uint32_t)(rdata_section_start[2] << 8) | (uint32_t)rdata_section_start[3];
+    retry_time_interval_elapse_before_retry_on_fail = read_u32(rdata_section_start);
     rdata_section_start += 4;
 
-    expire_upper_time_limit_before_zone_no_authoritative = (uint32_t)(rdata_section_start[0] << 24) | (uint32_t)(rdata_section_start[1] << 16) | (uint32_t)(rdata_section_start[2] << 8) | (uint32_t)rdata_section_start[3];
+    expire_upper_time_limit_before_zone_no_authoritative = read_u32(rdata_section_start);
     rdata_section_start += 4;
 
-    minimum_ttl_field_exported_with_any_rr = (uint32_t)(rdata_section_start[0] << 24) | (uint32_t)(rdata_section_start[1] << 16) | (uint32_t)(rdata_section_start[2] << 8) | (uint32_t)rdata_section_start[3];
+    minimum_ttl_field_exported_with_any_rr = read_u32(rdata_section_start);
     rdata_section_start += 4;
 
     snprintf(response_str, 512, "%s  %s  %u  %u  %u  %u %u", mname_authoritative_name_server_for_zone, rname_mailbox_responsible_for_zone, serial_version_number_of_zone, refresh_time_interval_before_refresh, retry_time_interval_elapse_before_retry_on_fail, expire_upper_time_limit_before_zone_no_authoritative, minimum_ttl_field_exported_with_any_rr);
@@ -360,16 +341,16 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
 
     dns_response_p += 2;
 
-    domain_message_answer.qdcount_question_section_entries_number = ((uint16_t)dns_response_p[0] << 8) | dns_response_p[1];
+    domain_message_answer.qdcount_question_section_entries_number = read_u16(dns_response_p);
     dns_response_p += 2;
 
-    domain_message_answer.ancount_answer_section_entries_number = ((uint16_t)dns_response_p[0] << 8) | dns_response_p[1];
+    domain_message_answer.ancount_answer_section_entries_number = read_u16(dns_response_p);
     dns_response_p += 2;
 
-    domain_message_answer.nscount_authority_section_entries_number = ((uint16_t)dns_response_p[0] << 8) | dns_response_p[1];
+    domain_message_answer.nscount_authority_section_entries_number = read_u16(dns_response_p);
     dns_response_p += 2;
 
-    domain_message_answer.arcount_additinal_section_entries_number = ((uint16_t)dns_response_p[0] << 8) | dns_response_p[1];
+    domain_message_answer.arcount_additinal_section_entries_number = read_u16(dns_response_p);
     dns_response_p += 2;
     // end parse query response header
 
