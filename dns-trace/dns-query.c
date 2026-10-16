@@ -18,11 +18,18 @@
 
 #define read_u16(p) (((uint16_t)p[0] << 8) | p[1])
 
+struct dns_trace_step
+{
+    uint32_t address;
+    char *doamin_name;
+};
+
 struct dns_client_args
 {
     bool reverse;
     uint8_t qtype;
     char value[256];
+    bool trace;
 };
 
 enum resolver_input_type
@@ -37,14 +44,14 @@ struct domain_response
     uint8_t addr;
 };
 
-struct domain_message_question
+struct dns_message_question
 {
     char name[256];
     uint16_t type;
     uint16_t class;
 };
 
-struct domain_message_answer
+struct dns_message_resource_record
 {
     char name[256];
     uint16_t type;
@@ -54,7 +61,7 @@ struct domain_message_answer
     uint8_t *rdata;
 };
 
-struct domain_message
+struct dns_message
 {
     int16_t id;
     bool qr;
@@ -69,9 +76,10 @@ struct domain_message
     uint16_t ancount_answer_section_entries_number;
     uint16_t nscount_authority_section_entries_number;
     uint16_t arcount_additinal_section_entries_number;
-    struct domain_message_question *questions;
-    struct domain_message_answer *answers;
-    struct domain_message_answer *authorities;
+    struct dns_message_question *questions;
+    struct dns_message_resource_record *answers;
+    struct dns_message_resource_record *authorities;
+    struct dns_message_resource_record *additional;
 };
 
 void print_byte_binary(unsigned char byte)
@@ -227,7 +235,7 @@ void dns_name_to_ipv6_string(uint8_t *dns_section_record_start, char *name, uint
     *name = 0;
 }
 
-int parse_dns_question_entry(struct domain_message_question *question, uint8_t *dns_response, size_t question_entry_offset, size_t *question_length)
+int parse_dns_question_entry(struct dns_message_question *question, uint8_t *dns_response, size_t question_entry_offset, size_t *question_length)
 {
     uint8_t *dns_question_section_p = dns_response + question_entry_offset;
 
@@ -246,7 +254,7 @@ int parse_dns_question_entry(struct domain_message_question *question, uint8_t *
     return 0;
 }
 
-int parse_dns_answer_entry(struct domain_message_answer *answer, uint8_t *dns_response, size_t answer_entry_offset, size_t *answer_length)
+int parse_dns_answer_entry(struct dns_message_resource_record *answer, uint8_t *dns_response, size_t answer_entry_offset, size_t *answer_length)
 {
     uint8_t *dns_answer_section_p = dns_response + answer_entry_offset;
 
@@ -315,92 +323,107 @@ void dns_answer_to_soa_string(char *response_str, uint8_t *rdata_section_start, 
     snprintf(response_str, 512, "%s  %s  %u  %u  %u  %u %u", mname_authoritative_name_server_for_zone, rname_mailbox_responsible_for_zone, serial_version_number_of_zone, refresh_time_interval_before_refresh, retry_time_interval_elapse_before_retry_on_fail, expire_upper_time_limit_before_zone_no_authoritative, minimum_ttl_field_exported_with_any_rr);
 }
 
-int dns_response_to_user_friendly(uint8_t *dns_response)
+void parse_dns_response(uint8_t *dns_response, struct dns_message *dns_message)
 {
-    struct domain_message domain_message_answer = {0};
-
     uint8_t *dns_response_p = dns_response;
 
     // start parse query response header
-    memcpy(&domain_message_answer.id, dns_response_p, 2);
-    domain_message_answer.id = ntohs(domain_message_answer.id);
+    memcpy(&dns_message->id, dns_response_p, 2);
+    dns_message->id = ntohs(dns_message->id);
 
     dns_response_p += 2;
 
     uint16_t codes = 0;
     memcpy(&codes, dns_response_p, 2);
     codes = ntohs(codes);
-    domain_message_answer.qr = (codes >> 15) & 1;
-    domain_message_answer.opcode = (codes >> 11) & 0x0f;
-    domain_message_answer.aa_authoritative_answer = (codes >> 10) & 1;
-    domain_message_answer.tc_truncation = (codes >> 9) & 1;
-    domain_message_answer.rd_recursion_desired = (codes >> 8) & 1;
-    domain_message_answer.ra_recursion_available = (codes >> 7) & 1;
-    domain_message_answer.z_for_future_use = (codes >> 4) & 7;
-    domain_message_answer.rcode_response_code = codes & 0x0f;
+    dns_message->qr = (codes >> 15) & 1;
+    dns_message->opcode = (codes >> 11) & 0x0f;
+    dns_message->aa_authoritative_answer = (codes >> 10) & 1;
+    dns_message->tc_truncation = (codes >> 9) & 1;
+    dns_message->rd_recursion_desired = (codes >> 8) & 1;
+    dns_message->ra_recursion_available = (codes >> 7) & 1;
+    dns_message->z_for_future_use = (codes >> 4) & 7;
+    dns_message->rcode_response_code = codes & 0x0f;
 
     dns_response_p += 2;
 
-    domain_message_answer.qdcount_question_section_entries_number = read_u16(dns_response_p);
+    dns_message->qdcount_question_section_entries_number = read_u16(dns_response_p);
     dns_response_p += 2;
 
-    domain_message_answer.ancount_answer_section_entries_number = read_u16(dns_response_p);
+    dns_message->ancount_answer_section_entries_number = read_u16(dns_response_p);
     dns_response_p += 2;
 
-    domain_message_answer.nscount_authority_section_entries_number = read_u16(dns_response_p);
+    dns_message->nscount_authority_section_entries_number = read_u16(dns_response_p);
     dns_response_p += 2;
 
-    domain_message_answer.arcount_additinal_section_entries_number = read_u16(dns_response_p);
+    dns_message->arcount_additinal_section_entries_number = read_u16(dns_response_p);
     dns_response_p += 2;
     // end parse query response header
 
     // parse question section entries
-    domain_message_answer.questions = malloc(sizeof(struct domain_message_question) * domain_message_answer.qdcount_question_section_entries_number);
+    dns_message->questions = malloc(sizeof(struct dns_message_question) * dns_message->qdcount_question_section_entries_number);
 
     size_t i = 0;
     size_t question_length = 0;
     size_t question_entry_offset = dns_response_p - dns_response;
-    while (i < domain_message_answer.qdcount_question_section_entries_number)
+    while (i < dns_message->qdcount_question_section_entries_number)
     {
-        parse_dns_question_entry(&domain_message_answer.questions[i], dns_response, question_entry_offset, &question_length);
+        parse_dns_question_entry(&dns_message->questions[i], dns_response, question_entry_offset, &question_length);
         question_entry_offset += question_length;
         dns_response_p += question_length;
         i++;
     }
 
-    domain_message_answer.answers = malloc(sizeof(struct domain_message_answer) * domain_message_answer.ancount_answer_section_entries_number);
+    dns_message->answers = malloc(sizeof(struct dns_message_resource_record) * dns_message->ancount_answer_section_entries_number);
 
     size_t j = 0;
     size_t answer_length = 0;
     size_t answer_entry_offset = dns_response_p - dns_response;
 
-    while (j < domain_message_answer.ancount_answer_section_entries_number)
+    while (j < dns_message->ancount_answer_section_entries_number)
     {
-        parse_dns_answer_entry(&domain_message_answer.answers[j], dns_response, answer_entry_offset, &answer_length);
+        parse_dns_answer_entry(&dns_message->answers[j], dns_response, answer_entry_offset, &answer_length);
         answer_entry_offset += answer_length;
         dns_response_p += answer_length;
         j++;
     }
 
-    domain_message_answer.authorities = malloc(sizeof(struct domain_message_answer) * domain_message_answer.nscount_authority_section_entries_number);
+    dns_message->authorities = malloc(sizeof(struct dns_message_resource_record) * dns_message->nscount_authority_section_entries_number);
 
     size_t m = 0;
     size_t authority_length = 0;
     size_t authority_entry_offset = dns_response_p - dns_response;
 
-    while (m < domain_message_answer.nscount_authority_section_entries_number)
+    while (m < dns_message->nscount_authority_section_entries_number)
     {
-        parse_dns_answer_entry(&domain_message_answer.authorities[m], dns_response, authority_entry_offset, &authority_length);
+        parse_dns_answer_entry(&dns_message->authorities[m], dns_response, authority_entry_offset, &authority_length);
         authority_entry_offset += authority_length;
         dns_response_p += authority_length;
         m++;
     }
 
+    dns_message->additional = malloc(sizeof(struct dns_message_resource_record) * dns_message->arcount_additinal_section_entries_number);
+
+    size_t k = 0;
+    size_t additional_length = 0;
+    size_t additional_entry_offset = dns_response_p - dns_response;
+
+    while (k < dns_message->arcount_additinal_section_entries_number)
+    {
+        parse_dns_answer_entry(&dns_message->additional[k], dns_response, additional_entry_offset, &additional_length);
+        additional_entry_offset += additional_length;
+        dns_response_p += additional_length;
+        k++;
+    }
+}
+
+void print_dns_answer(struct dns_message *domain_message_answer, uint8_t *dns_response)
+{
     printf("ANSWER SECTION:\n\n");
     size_t k;
-    for (k = 0; k < domain_message_answer.ancount_answer_section_entries_number; k++)
+    for (k = 0; k < domain_message_answer->ancount_answer_section_entries_number; k++)
     {
-        struct domain_message_answer aw = domain_message_answer.answers[k];
+        struct dns_message_resource_record aw = domain_message_answer->answers[k];
 
         char *dns_type_str = dns_type_value_to_string(aw.type);
 
@@ -443,9 +466,9 @@ int dns_response_to_user_friendly(uint8_t *dns_response)
 
     printf("AUTHORITY SECTION:\n\n");
     size_t l;
-    for (l = 0; l < domain_message_answer.nscount_authority_section_entries_number; l++)
+    for (l = 0; l < domain_message_answer->nscount_authority_section_entries_number; l++)
     {
-        struct domain_message_answer au = domain_message_answer.authorities[l];
+        struct dns_message_resource_record au = domain_message_answer->authorities[l];
 
         char *dns_type_str = dns_type_value_to_string(au.type);
 
@@ -614,43 +637,52 @@ void build_dns_query(char *domain, uint8_t qtype, uint8_t *buf, size_t *dns_quer
 int parse_args(int argc, char **argv, struct dns_client_args *args)
 {
 
-    if (strncmp(argv[1], "-x", 2) == 0)
+    size_t current_arg_index = 1;
+
+    if (strncmp(argv[current_arg_index], "-x", 2) == 0)
     {
         args->reverse = 1;
-        strncpy(args->value, argv[2], strlen(argv[2]));
+        strncpy(args->value, argv[current_arg_index + 1], strlen(argv[current_arg_index + 1]));
         args->qtype = 12;
 
         return 0;
     }
+    else if (strncmp(argv[current_arg_index], "--trace", 7) == 0)
+    {
+        args->trace = 1;
+        strncpy(args->value, argv[current_arg_index + 1], strlen(argv[current_arg_index + 1]));
+        current_arg_index++;
+    }
     else
     {
         args->reverse = 0;
-        strncpy(args->value, argv[1], strlen(argv[1]));
+        strncpy(args->value, argv[current_arg_index], strlen(argv[current_arg_index]));
+        current_arg_index++;
     }
 
     const size_t arg_qtype_length = strlen(argv[2]);
 
-    if (strncmp(argv[2], "TXT", arg_qtype_length) == 0)
+    if (strncmp(argv[current_arg_index], "TXT", arg_qtype_length) == 0)
     {
         args->qtype = 16;
     }
-    else if (strncmp(argv[2], "A", arg_qtype_length) == 0)
+    else if (strncmp(argv[current_arg_index], "A", arg_qtype_length) == 0)
     {
         args->qtype = 1;
     }
-    else if (strncmp(argv[2], "AAAA", arg_qtype_length) == 0)
+    else if (strncmp(argv[current_arg_index], "AAAA", arg_qtype_length) == 0)
     {
         args->qtype = 28;
     }
-    else if (strncmp(argv[2], "NS", arg_qtype_length) == 0)
+    else if (strncmp(argv[current_arg_index], "NS", arg_qtype_length) == 0)
     {
         args->qtype = 2;
     }
-    else if (strncmp(argv[2], "PTR", arg_qtype_length) == 0)
+    else if (strncmp(argv[current_arg_index], "PTR", arg_qtype_length) == 0)
     {
         args->qtype = 12;
     }
-    else if (strncmp(argv[2], "SOA", arg_qtype_length) == 0)
+    else if (strncmp(argv[current_arg_index], "SOA", arg_qtype_length) == 0)
     {
         args->qtype = 6;
     }
@@ -662,10 +694,21 @@ int parse_args(int argc, char **argv, struct dns_client_args *args)
     return 0;
 }
 
-int main(int argc, char **argv)
+void recursive_resolve(char *name, char *name_server, struct dns_trace_step *steps)
+{
+    // dns_trace_step
+}
+
+struct query_info
+{
+    char *domain;
+    bool reverse;
+    uint16_t qtype;
+};
+
+int send_query(const char *name_server_addr, struct query_info *query_info, struct dns_message *dns_response_message, uint8_t *client_dns_response)
 {
     int fd;
-
     if ((fd = socket(AF_INET, SOCK_DGRAM, 0)) == -1)
     {
         perror("socket failed");
@@ -673,9 +716,10 @@ int main(int argc, char **argv)
     }
 
     struct in_addr in_addr;
-    if (!inet_pton(AF_INET, "1.1.1.1", &in_addr) == -1)
+    if (inet_pton(AF_INET, name_server_addr, &in_addr) == -1)
     {
         perror("inet_pton failed");
+        return 1;
     }
 
     struct sockaddr_in addr = {0};
@@ -686,20 +730,19 @@ int main(int argc, char **argv)
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == -1)
     {
         perror("connect failed");
+        return 1;
     }
 
     uint8_t buf[4096] = {0};
     size_t dns_query_size = 0;
-    struct dns_client_args args = {0};
-    parse_args(argc, argv, &args);
 
-    if (args.reverse)
+    if (query_info->reverse)
     {
-        build_dns_inverse_query(args.value, buf, &dns_query_size);
+        build_dns_inverse_query(query_info->domain, buf, &dns_query_size);
     }
     else
     {
-        build_dns_query(args.value, args.qtype, buf, &dns_query_size);
+        build_dns_query(query_info->domain, query_info->qtype, buf, &dns_query_size);
     }
 
     if (send(fd, buf, dns_query_size, 0) == -1)
@@ -708,7 +751,17 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    uint8_t dns_response[512];
+    uint8_t *dns_response;
+    if (client_dns_response != NULL)
+    {
+        dns_response = client_dns_response;
+    }
+    else
+    {
+        uint8_t internal_dns_response[512];
+        dns_response = internal_dns_response;
+    }
+
     ssize_t query_length;
     size_t used = 0;
     while (1)
@@ -740,7 +793,32 @@ int main(int argc, char **argv)
     }
     printf("\n");
 
-    dns_response_to_user_friendly(dns_response);
+    parse_dns_response(dns_response, dns_response_message);
+}
+
+int main(int argc, char **argv)
+{
+    struct dns_client_args args = {0};
+    parse_args(argc, argv, &args);
+
+    if (args.trace == 1)
+    {
+        printf("trace is enabled\n");
+    }
+    else
+    {
+        const char *name_server_addr = "1.1.1.1";
+        struct query_info query_info;
+        query_info.domain = args.value;
+        query_info.qtype = args.qtype;
+        query_info.reverse = args.reverse;
+
+        struct dns_message dns_answer = {0};
+        uint8_t dns_response[512];
+        send_query(name_server_addr, &query_info, &dns_answer, dns_response);
+
+        print_dns_answer(&dns_answer, dns_response);
+    }
 
     return 0;
 }
