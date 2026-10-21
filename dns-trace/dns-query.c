@@ -417,6 +417,19 @@ void parse_dns_response(uint8_t *dns_response, struct dns_message *dns_message)
     }
 }
 
+void ipv4_binary_to_string(uint32_t ipv4, char *buf, size_t buf_size)
+{
+    struct in_addr tmp_addr = {0};
+    tmp_addr.s_addr = ipv4;
+
+    inet_ntop(AF_INET, &tmp_addr, buf, buf_size);
+}
+
+void ipv6_binary_to_string(uint8_t *ipv6, char *buf, size_t buf_size)
+{
+    inet_ntop(AF_INET6, ipv6, buf, buf_size);
+}
+
 void print_dns_answer(struct dns_message *domain_message_answer, uint8_t *dns_response)
 {
     printf("ANSWER SECTION:\n\n");
@@ -433,18 +446,17 @@ void print_dns_answer(struct dns_message *domain_message_answer, uint8_t *dns_re
 
         if (aw.type == 1)
         {
-            size_t l;
-            for (l = 0; l < aw.rdlength; l++)
-            {
-                printf(l == aw.rdlength - 1 ? "%d\n" : "%d.", aw.rdata[l]);
-            }
+            char ipv4_str[INET_ADDRSTRLEN];
+            ipv4_binary_to_string(htonl(read_u32(aw.rdata)), ipv4_str, INET_ADDRSTRLEN);
+
+            printf("%s\n", ipv4_str);
         }
         else if (aw.type == 28)
         {
-            char dns_answer_ipv6_value[64];
-            dns_name_to_ipv6_string(aw.rdata, dns_answer_ipv6_value, dns_response, NULL);
+            char ipv6_str[INET6_ADDRSTRLEN];
+            ipv6_binary_to_string(aw.rdata, ipv6_str, INET6_ADDRSTRLEN);
 
-            printf("%s\n", dns_answer_ipv6_value);
+            printf("%s\n", ipv6_str);
         }
         else if (aw.type == 6)
         {
@@ -694,11 +706,6 @@ int parse_args(int argc, char **argv, struct dns_client_args *args)
     return 0;
 }
 
-void recursive_resolve(char *name, char *name_server, struct dns_trace_step *steps)
-{
-    // dns_trace_step
-}
-
 struct query_info
 {
     char *domain;
@@ -796,6 +803,43 @@ int send_query(const char *name_server_addr, struct query_info *query_info, stru
     parse_dns_response(dns_response, dns_response_message);
 }
 
+void resolve_with_trace(char *name, size_t name_size, char *name_server, size_t name_server_size, struct dns_trace_step *steps)
+{
+    char result_name_server[15];
+
+    if (name_server == NULL)
+    {
+        const char *root_name_server = "202.12.27.33";
+        strncpy(result_name_server, root_name_server, strlen(root_name_server));
+    }
+    else
+    {
+        strncpy(result_name_server, name_server, name_server_size);
+    }
+
+    struct query_info query_info;
+    strncpy(query_info.domain, name, name_size);
+    query_info.qtype = 1;
+    query_info.reverse = false;
+
+    struct dns_message dns_answer = {0};
+    uint8_t dns_response[512];
+    send_query(result_name_server, &query_info, &dns_answer, dns_response);
+
+    if (dns_answer.ancount_answer_section_entries_number > 0)
+    {
+        printf("Concrete ip address has been resolved\n");
+        return;
+    }
+
+    if (dns_answer.nscount_authority_section_entries_number > 0)
+    {
+        // struct dns_message_resource_record *first = dns_answer.authorities[0];
+        // first.
+    }
+    // dns_trace_step
+}
+
 int main(int argc, char **argv)
 {
     struct dns_client_args args = {0};
@@ -803,6 +847,8 @@ int main(int argc, char **argv)
 
     if (args.trace == 1)
     {
+        const char *root_server_addr = "202.12.27.33";
+
         printf("trace is enabled\n");
     }
     else
