@@ -20,8 +20,8 @@
 
 struct dns_trace_step
 {
-    uint32_t address;
-    char *doamin_name;
+    char domain_address[INET_ADDRSTRLEN];
+    char *domain_name;
 };
 
 struct dns_client_args
@@ -803,37 +803,71 @@ int send_query(const char *name_server_addr, struct query_info *query_info, stru
     parse_dns_response(dns_response, dns_response_message);
 }
 
-void resolve_with_trace(char *name, size_t name_size, char *name_server, size_t name_server_size, struct dns_trace_step *steps)
+void resolve_with_trace(char *domain_name, size_t domain_name_size, const char *name_server_address, size_t name_server_address_size, struct dns_trace_step *trace, size_t *trace_steps_count, struct dns_message *answer, uint8_t *answer_dns_response)
 {
-    char result_name_server[15];
+    char result_name_server[INET_ADDRSTRLEN];
 
-    if (name_server == NULL)
+    if (name_server_address == NULL)
     {
         const char *root_name_server = "202.12.27.33";
-        strncpy(result_name_server, root_name_server, strlen(root_name_server));
+        strncpy(result_name_server, root_name_server, INET_ADDRSTRLEN);
     }
     else
     {
-        strncpy(result_name_server, name_server, name_server_size);
+        strncpy(result_name_server, name_server_address, name_server_address_size);
     }
 
     struct query_info query_info;
-    strncpy(query_info.domain, name, name_size);
+    query_info.domain = domain_name;
     query_info.qtype = 1;
     query_info.reverse = false;
 
     struct dns_message dns_answer = {0};
     uint8_t dns_response[512];
+
+    strncpy((*(trace++)).domain_address, result_name_server, INET_ADDRSTRLEN);
+    (*trace_steps_count)++;
     send_query(result_name_server, &query_info, &dns_answer, dns_response);
 
     if (dns_answer.ancount_answer_section_entries_number > 0)
     {
         printf("Concrete ip address has been resolved\n");
+        ipv4_binary_to_string(ntohl(read_u32(dns_answer.answers[0].rdata)), trace[0].domain_address, INET_ADDRSTRLEN);
+        memcpy(answer_dns_response, dns_response, 512);
+        *answer = dns_answer;
+        (*trace_steps_count)++;
         return;
     }
 
     if (dns_answer.nscount_authority_section_entries_number > 0)
     {
+        struct dns_message_resource_record first = dns_answer.authorities[0];
+        if (first.type == 2)
+        {
+            printf("Pointer to authority has come.\n");
+        }
+
+        char first_ns_name[128];
+        domain_name_labels_to_string(first.rdata, first_ns_name, dns_response, (size_t *)&first.rdlength);
+
+        printf("the pointed authority is: %s\n", first_ns_name);
+
+        if (dns_answer.arcount_additinal_section_entries_number > 0)
+        {
+            size_t i;
+            for (i = 0; i < dns_answer.arcount_additinal_section_entries_number; i++)
+            {
+                struct dns_message_resource_record additional = dns_answer.additional[i];
+                if (strncmp(additional.name, first_ns_name, strlen(first.name)) == 0)
+                {
+                    char next_hop_address[INET_ADDRSTRLEN];
+                    ipv4_binary_to_string(ntohl(read_u32(additional.rdata)), next_hop_address, INET_ADDRSTRLEN);
+                    printf("Next address is: %s\n", next_hop_address);
+                    resolve_with_trace(domain_name, domain_name_size, next_hop_address, INET_ADDRSTRLEN, trace, trace_steps_count, answer, answer_dns_response);
+                    return;
+                }
+            }
+        }
         // struct dns_message_resource_record *first = dns_answer.authorities[0];
         // first.
     }
@@ -845,11 +879,31 @@ int main(int argc, char **argv)
     struct dns_client_args args = {0};
     parse_args(argc, argv, &args);
 
+    struct dns_message dns_answer = {0};
+    uint8_t dns_response[512];
+
     if (args.trace == 1)
     {
-        const char *root_server_addr = "202.12.27.33";
-
         printf("trace is enabled\n");
+        const char *root_server_addr = "202.12.27.33";
+        struct dns_trace_step steps[15] = {0};
+        size_t steps_count = 0;
+        resolve_with_trace(args.value, strlen(args.value), root_server_addr, INET_ADDRSTRLEN, steps, &steps_count, &dns_answer, dns_response);
+
+        size_t i;
+        for (i = 0; i < steps_count; i++)
+        {
+            if (i == steps_count - 1)
+            {
+
+                printf("%s", steps[i].domain_address);
+            }
+            else
+            {
+                printf("%s -> ", steps[i].domain_address);
+            }
+        }
+        printf("\n");
     }
     else
     {
@@ -859,12 +913,9 @@ int main(int argc, char **argv)
         query_info.qtype = args.qtype;
         query_info.reverse = args.reverse;
 
-        struct dns_message dns_answer = {0};
-        uint8_t dns_response[512];
         send_query(name_server_addr, &query_info, &dns_answer, dns_response);
-
-        print_dns_answer(&dns_answer, dns_response);
     }
 
+    print_dns_answer(&dns_answer, dns_response);
     return 0;
 }
