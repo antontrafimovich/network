@@ -4,8 +4,6 @@ from socket import inet_ntop, AF_INET
 
 
 def parse_packet(packet: bytes):
-    print(packet.hex("\\"))
-
     dmac_destination_mac_address = packet[0:6]
     smac_destination_mac_address = packet[6:12]
     type_protocol_type = packet[12:14]
@@ -30,24 +28,24 @@ def parse_packet(packet: bytes):
     source_address = ip_packet_raw[12:16]
     destination_address = ip_packet_raw[16:20]
 
-    print(f"ip protocol version is {version}")
-    print(f"IHL (internet header length) is {ihl}")
-    print(f"Type of Service: precedence = {type_of_service >> 5}, \
-            Delay = {'Normal' if (type_of_service >> 4) & 0b1 == 0 else 'Low' } \
-            Throughput = {'Normal' if (type_of_service >> 3) & 0b1 == 0 else 'High'} \
-            Relibility = {'Normal' if (type_of_service >> 2) & 0b1 == 0 else 'High'}")
-    print(f"total length is {int.from_bytes(total_length, 'big')}")
-    print(f"identificaiton is {identification}")
-    print(
-        f"flags: reserved (must be zero) = {flags & 0b100}; DF = {flags & 0b010}; MF = {flags & 0b1}"
-    )
-    print(f"fragment offset is {fragment_offset}")
-    print(f"ttl is {ttl}")
-    print(f"protocol is {protocol}")
-    print(f"header checksum is {int.from_bytes(header_checksum, 'big')}")
-    print(f"source address is {inet_ntop(AF_INET, source_address)}")
-    print(f"destination address is {inet_ntop(AF_INET, destination_address)}")
-    print("\n")
+    response = {
+        "packet_hex": packet.hex("\\"),
+        "ip_ihl": ihl,
+        "ip_version": version,
+        "ip_precedence": type_of_service >> 5,
+        "ip_delay": "Normal" if (type_of_service >> 4) & 0b1 == 0 else "Low",
+        "ip_throughput": "Normal" if (type_of_service >> 3) & 0b1 == 0 else "High",
+        "ip_reliability": "Normal" if (type_of_service >> 2) & 0b1 == 0 else "High",
+        "ip_total_length": int.from_bytes(total_length, "big"),
+        "ip_identification": identification,
+        "ip_flags": {"reserved": flags & 0b100, "df": flags & 0b010, "mf": flags & 0b1},
+        "ip_fragment_offset": fragment_offset,
+        "ip_ttl": ttl,
+        "ip_protocol": protocol,
+        "ip_header_checksum": int.from_bytes(header_checksum, "big"),
+        "ip_source_address": inet_ntop(AF_INET, source_address),
+        "ip_destination_address": inet_ntop(AF_INET, destination_address),
+    }
 
     # tcp packet raw must be of length 44
     tcp_packet_raw = ip_packet_raw[20:]
@@ -62,28 +60,7 @@ def parse_packet(packet: bytes):
     window = tcp_packet_raw[14:16]
     checksum = tcp_packet_raw[16:18]
     urgent_pointer = tcp_packet_raw[18:20]
-    options_padding = tcp_packet_raw[20:]
-
-    print(f"TCP Source Port is {int.from_bytes(source_port, 'big')}")
-    print(f"TCP Destination Port is {int.from_bytes(destination_port, 'big')}")
-    print(f"TCP Sequence Number is {int.from_bytes(sequence_number, 'big')}")
-    print(
-        f"TCP Acknowledgment Number is {int.from_bytes(acknowledgment_number, 'big')}"
-    )
-    print(f"TCP Data Offset is {data_offset}")
-    print(f"TCP Reserved is {reserved}")
-    print(f"TCP Flags are: Urgent - {True if flags & 0b100000 else False}, \
-            ACK - {True if flags & 0b010000 else False} \
-            PSH - {True if flags & 0b001000 else False},\
-            RST - {True if flags & 0b000100 else False},\
-            SYN - {True if flags & 0b000010 else False} \
-            FIN - {True if flags & 0b000001 else False}")
-    print(f"TCP Window is {int.from_bytes(window, 'big')}")
-    print(f"TCP Checksum is {int.from_bytes(checksum, 'big')}")
-    print(f"TCP Urgent Pointer is {int.from_bytes(urgent_pointer, 'big')}")
-
-    print("Options and padding are:")
-    print(options_padding.hex("\\"))
+    options_padding = tcp_packet_raw[20 : (20 + (data_offset - 5) * 4)]
 
     options_size = (data_offset - 5) * 32
 
@@ -96,12 +73,16 @@ def parse_packet(packet: bytes):
     timestamp_echo_reply = 0
     sack_permitted = False
 
-    i = 0
+    print(f"data offset is {data_offset}")
+    print(f"options padding length is {len(options_padding)}")
+    print(f"Options and padding are:")
+    print(options_padding.hex("\\"))
 
-    while options_padding[i] != 0:
+    i = 0
+    while i < len(options_padding) and options_padding[i] != 0:
         if options_padding[i] == 1:
             i += 1
-            pass
+            continue
 
         if options_padding[i] == 2:
             i += 1
@@ -111,7 +92,7 @@ def parse_packet(packet: bytes):
                 options_padding[i : i + option_len], "big"
             )
             i += option_len
-            pass
+            continue
 
         if options_padding[i] == 3:
             i += 1
@@ -119,7 +100,7 @@ def parse_packet(packet: bytes):
             i += 1
             window_scale = int.from_bytes(options_padding[i : i + option_len], "big")
             i += option_len
-            pass
+            continue
 
         if options_padding[i] == 8:
             i += 1
@@ -133,20 +114,91 @@ def parse_packet(packet: bytes):
                 options_padding[i : i + (option_len // 2)], "big"
             )
             i += option_len // 2
-            pass
+            continue
 
         if options_padding[i] == 4:
             sack_permitted = True
             i += 2
-            pass
+            continue
 
-    print(f"TCP Maximum Segment size is {maximum_segment_size}")
-    print(f"TCP Window Scale is {window_scale}")
+    response = {
+        "tcp_source_port": int.from_bytes(source_port, "big"),
+        "tcp_destination_port": int.from_bytes(destination_port, "big"),
+        "tcp_sequence_number": int.from_bytes(sequence_number, "big"),
+        "tcp_acknowledgment_number": int.from_bytes(acknowledgment_number, "big"),
+        "tcp_data_offset": data_offset,
+        "tcp_reserved": reserved,
+        "tcp_flags": {
+            "urgent": bool(flags & 0b100000),
+            "ack": bool(flags & 0b010000),
+            "psh": bool(flags & 0b001000),
+            "rst": bool(flags & 0b000100),
+            "syn": bool(flags & 0b000010),
+            "fin": bool(flags & 0b000001),
+        },
+        "tcp_window": int.from_bytes(window, "big"),
+        "tcp_checksum": int.from_bytes(checksum, "big"),
+        "tcp_urgent_pointer": int.from_bytes(urgent_pointer, "big"),
+        "tcp_options_padding": options_padding,
+        "tcp_maximum_segment_size": maximum_segment_size,
+        "tcp_window_scale": window_scale,
+        "tcp_timestamp_value": timestamp_value,
+        "tcp_timestamp_echo_reply": timestamp_echo_reply,
+        "tcp_sack_permitted": sack_permitted,
+        **response,
+    }
 
-    print(f"TCP Timestamp Value is {timestamp_value}")
-    print(f"TCP Timestamp Echo Reply is {timestamp_echo_reply}")
-    print(f"TCP SACK Permitted is {sack_permitted}")
-    print("")
+    return response
+
+
+def log_packet(packet: dict):
+    print(packet["packet_hex"])
+    print(f"ip protocol version is {packet['ip_version']}")
+    print(f"IHL (internet header length) is {packet['ip_ihl']}")
+    print(
+        f"Type of Service: precedence = {packet['ip_precedence']}, "
+        f"Delay = {packet['ip_delay']} "
+        f"Throughput = {packet['ip_throughput']} "
+        f"Reliability = {packet['ip_reliability']}"
+    )
+    print(f"total length is {packet['ip_total_length']}")
+    print(f"identification is {packet['ip_identification']}")
+    print(
+        f"flags: reserved (must be zero) = {packet['ip_flags']['reserved']}; "
+        f"DF = {packet['ip_flags']['df']}; MF = {packet['ip_flags']['mf']}"
+    )
+    print(f"fragment offset is {packet['ip_fragment_offset']}")
+    print(f"ttl is {packet['ip_ttl']}")
+    print(f"protocol is {packet['ip_protocol']}")
+    print(f"header checksum is {packet['ip_header_checksum']}")
+    print(f"source address is {packet['ip_source_address']}")
+    print(f"destination address is {packet['ip_destination_address']}")
+    print("\n")
+
+    print(f"TCP Source Port is {packet['tcp_source_port']}")
+    print(f"TCP Destination Port is {packet['tcp_destination_port']}")
+    print(f"TCP Sequence Number is {packet['tcp_sequence_number']}")
+    print(f"TCP Acknowledgment Number is {packet['tcp_acknowledgment_number']}")
+    print(f"TCP Data Offset is {packet['tcp_data_offset']}")
+    print(f"TCP Reserved is {packet['tcp_reserved']}")
+    print(
+        f"TCP Flags are: Urgent - {packet['tcp_flags']['urgent']}, "
+        f"ACK - {packet['tcp_flags']['ack']} "
+        f"PSH - {packet['tcp_flags']['psh']}, "
+        f"RST - {packet['tcp_flags']['rst']}, "
+        f"SYN - {packet['tcp_flags']['syn']} "
+        f"FIN - {packet['tcp_flags']['fin']}"
+    )
+    print(f"TCP Window is {packet['tcp_window']}")
+    print(f"TCP Checksum is {packet['tcp_checksum']}")
+    print(f"TCP Urgent Pointer is {packet['tcp_urgent_pointer']}")
+    print("Options and padding are:")
+    print(packet["tcp_options_padding"].hex("\\"))
+    print(f"TCP Maximum Segment size is {packet['tcp_maximum_segment_size']}")
+    print(f"TCP Window Scale is {packet['tcp_window_scale']}")
+    print(f"TCP Timestamp Value is {packet['tcp_timestamp_value']}")
+    print(f"TCP Timestamp Echo Reply is {packet['tcp_timestamp_echo_reply']}")
+    print(f"TCP SACK Permitted is {packet['tcp_sack_permitted']}")
 
 
 f = open("lossy.pcap", "rb")
@@ -156,7 +208,7 @@ major_version = f.read(2)
 minor_version = f.read(2)
 timezone_offset = f.read(4)
 timestamp_accuracy = f.read(4)
-snapshot_length = f.read(4)
+snapshot_length = int.from_bytes(f.read(4), sys.byteorder)
 link_layer_header_type = f.read(4)
 
 print(f"number is {int.from_bytes(magic_number, sys.byteorder):x}")
@@ -164,49 +216,39 @@ print(f"major version is {int.from_bytes(major_version, sys.byteorder):x}")
 print(f"minor version is {int.from_bytes(minor_version, sys.byteorder):x}")
 print(f"timezone offset is {int.from_bytes(timezone_offset, sys.byteorder)}")
 print(f"timestamp accuracy is {int.from_bytes(timestamp_accuracy, sys.byteorder)}")
-print(f"snapshot length is {int.from_bytes(snapshot_length, sys.byteorder)}")
+print(f"snapshot length is {snapshot_length}")
 print(
     f"link layer header type is {int.from_bytes(link_layer_header_type, sys.byteorder)}\n"
 )
 
-timestamp_seconds = f.read(4)
-timestamp_microseconds = f.read(4)
-captured_packet_data_length = f.read(4)
-untruncated_packet_data_length = f.read(4)
 
-print(f"timestamps in seconds {int.from_bytes(timestamp_seconds, sys.byteorder)}")
-print(
-    f"timestamps in microseconds {int.from_bytes(timestamp_microseconds, sys.byteorder)}"
-)
-print(
-    f"captured packet data length {int.from_bytes(captured_packet_data_length, sys.byteorder)}"
-)
-print(
-    f"untruncated captured packet data length {int.from_bytes(untruncated_packet_data_length, sys.byteorder)}\n"
-)
+i = 0
+while i < snapshot_length:
+    timestamp_seconds = f.read(4)
+    timestamp_microseconds = f.read(4)
+    captured_packet_data_length = int.from_bytes(f.read(4), sys.byteorder)
+    untruncated_packet_data_length = f.read(4)
 
-packet_raw = f.read(int.from_bytes(captured_packet_data_length, sys.byteorder))
+    print(f"timestamps in seconds {int.from_bytes(timestamp_seconds, sys.byteorder)}")
+    print(
+        f"timestamps in microseconds {int.from_bytes(timestamp_microseconds, sys.byteorder)}"
+    )
+    print(f"captured packet data length {captured_packet_data_length}")
+    print(
+        f"untruncated captured packet data length {int.from_bytes(untruncated_packet_data_length, sys.byteorder)}\n"
+    )
 
-parse_packet(packet_raw)
+    packet_raw = f.read(captured_packet_data_length)
 
+    response = parse_packet(packet_raw)
+
+    # log_packet(response)
+
+    print("")
+
+    i += captured_packet_data_length
 
 # print(f'timestamp as date {dt.fromtimestamp(int.from_bytes(timestamp_seconds, sys.byteorder))}')
 
-
-timestamp_seconds = f.read(4)
-timestamp_microseconds = f.read(4)
-captured_packet_data_length = f.read(4)
-untruncated_packet_data_length = f.read(4)
-
-print(f"timestamps in seconds {int.from_bytes(timestamp_seconds, sys.byteorder)}")
-print(
-    f"timestamps in microseconds {int.from_bytes(timestamp_microseconds, sys.byteorder)}"
-)
-print(
-    f"captured packet data length {int.from_bytes(captured_packet_data_length, sys.byteorder)}"
-)
-print(
-    f"untruncated captured packet data length {int.from_bytes(untruncated_packet_data_length, sys.byteorder)}\n"
-)
 
 f.close()
