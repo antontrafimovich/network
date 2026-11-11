@@ -60,7 +60,8 @@ def parse_packet(packet: bytes):
     window = tcp_packet_raw[14:16]
     checksum = tcp_packet_raw[16:18]
     urgent_pointer = tcp_packet_raw[18:20]
-    options_padding = tcp_packet_raw[20 : (20 + (data_offset - 5) * 4)]
+    options_padding = tcp_packet_raw[20 : data_offset * 4]
+    data = tcp_packet_raw[data_offset * 4 :]
 
     options_size = (data_offset - 5) * 32
 
@@ -72,11 +73,6 @@ def parse_packet(packet: bytes):
     timestamp_value = 0
     timestamp_echo_reply = 0
     sack_permitted = False
-
-    print(f"data offset is {data_offset}")
-    print(f"options padding length is {len(options_padding)}")
-    print(f"Options and padding are:")
-    print(options_padding.hex("\\"))
 
     i = 0
     while i < len(options_padding) and options_padding[i] != 0:
@@ -148,7 +144,7 @@ def parse_packet(packet: bytes):
         **response,
     }
 
-    return response
+    return response, data
 
 
 def log_packet(packet: dict):
@@ -240,9 +236,11 @@ while i < snapshot_length:
 
     packet_raw = f.read(captured_packet_data_length)
 
-    response = parse_packet(packet_raw)
+    response, data = parse_packet(packet_raw)
 
-    # log_packet(response)
+    print("=== Packet Start ===")
+    log_packet(response)
+    print("=== Packet End ===")
 
     print("")
 
