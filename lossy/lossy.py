@@ -17,11 +17,11 @@ def parse_packet(packet: bytes):
     ihl = version_ihl & 0x0F
 
     type_of_service = ip_packet_raw[1]
-    total_length = ip_packet_raw[2:4]
+    total_length = int.from_bytes(ip_packet_raw[2:4], "big")
     identification = ip_packet_raw[4:6]
     flags_fragment_offset_raw = ip_packet_raw[6:8]
     flags = flags_fragment_offset_raw[0] >> 5
-    fragment_offset = int.from_bytes(flags_fragment_offset_raw, sys.byteorder) & 0x1FFF
+    fragment_offset = int.from_bytes(flags_fragment_offset_raw, "big") & 0x1FFF
     ttl = ip_packet_raw[8]
     protocol = ip_packet_raw[9]
     header_checksum = ip_packet_raw[10:12]
@@ -36,7 +36,7 @@ def parse_packet(packet: bytes):
         "ip_delay": "Normal" if (type_of_service >> 4) & 0b1 == 0 else "Low",
         "ip_throughput": "Normal" if (type_of_service >> 3) & 0b1 == 0 else "High",
         "ip_reliability": "Normal" if (type_of_service >> 2) & 0b1 == 0 else "High",
-        "ip_total_length": int.from_bytes(total_length, "big"),
+        "ip_total_length": total_length,
         "ip_identification": identification,
         "ip_flags": {"reserved": flags & 0b100, "df": flags & 0b010, "mf": flags & 0b1},
         "ip_fragment_offset": fragment_offset,
@@ -53,15 +53,16 @@ def parse_packet(packet: bytes):
     destination_port = tcp_packet_raw[2:4]
     sequence_number = tcp_packet_raw[4:8]
     acknowledgment_number = tcp_packet_raw[8:12]
-    data_offset_reserved_flags = tcp_packet_raw[12:14]
-    data_offset = int.from_bytes(data_offset_reserved_flags, "big") >> 12
-    reserved = (int.from_bytes(data_offset_reserved_flags, "big") >> 6) & 0b111111
-    flags = int.from_bytes(data_offset_reserved_flags, "big") & 0b111111
+    data_offset_reserved = tcp_packet_raw[12]
+    data_offset = data_offset_reserved >> 4
+    reserved = data_offset_reserved & 0x0F
+    flags = tcp_packet_raw[13]
     window = tcp_packet_raw[14:16]
     checksum = tcp_packet_raw[16:18]
     urgent_pointer = tcp_packet_raw[18:20]
     options_padding = tcp_packet_raw[20 : data_offset * 4]
-    data = tcp_packet_raw[data_offset * 4 :]
+
+    data = tcp_packet_raw[data_offset * 4 : total_length - ihl * 4]
 
     options_size = (data_offset - 5) * 32
 
@@ -125,12 +126,14 @@ def parse_packet(packet: bytes):
         "tcp_data_offset": data_offset,
         "tcp_reserved": reserved,
         "tcp_flags": {
-            "urgent": bool(flags & 0b100000),
-            "ack": bool(flags & 0b010000),
-            "psh": bool(flags & 0b001000),
-            "rst": bool(flags & 0b000100),
-            "syn": bool(flags & 0b000010),
-            "fin": bool(flags & 0b000001),
+            "cwr": bool(flags & 0b10000000),
+            "ecn": bool(flags & 0b01000000),
+            "urgent": bool(flags & 0b00100000),
+            "ack": bool(flags & 0b00010000),
+            "psh": bool(flags & 0b1000),
+            "rst": bool(flags & 0b0100),
+            "syn": bool(flags & 0b0010),
+            "fin": bool(flags & 0b0001),
         },
         "tcp_window": int.from_bytes(window, "big"),
         "tcp_checksum": int.from_bytes(checksum, "big"),
@@ -148,7 +151,7 @@ def parse_packet(packet: bytes):
 
 
 def log_packet(packet: dict):
-    print(packet["packet_hex"])
+    # print(packet["packet_hex"])
     print(f"ip protocol version is {packet['ip_version']}")
     print(f"IHL (internet header length) is {packet['ip_ihl']}")
     print(
@@ -161,7 +164,7 @@ def log_packet(packet: dict):
     print(f"identification is {packet['ip_identification']}")
     print(
         f"flags: reserved (must be zero) = {packet['ip_flags']['reserved']}; "
-        f"DF = {packet['ip_flags']['df']}; MF = {packet['ip_flags']['mf']}"
+        f"DF = {"Don't fragment" if packet['ip_flags']['df'] > 0 else "May Fragment"}; MF = {"More fragments" if packet['ip_flags']['mf'] > 0 else "Last Fragment"}"
     )
     print(f"fragment offset is {packet['ip_fragment_offset']}")
     print(f"ttl is {packet['ip_ttl']}")
@@ -179,10 +182,12 @@ def log_packet(packet: dict):
     print(f"TCP Reserved is {packet['tcp_reserved']}")
     print(
         f"TCP Flags are: Urgent - {packet['tcp_flags']['urgent']}, "
-        f"ACK - {packet['tcp_flags']['ack']} "
+        f"CWE (Congestion Window Reduced) - {packet['tcp_flags']['cwr']}, "
+        f"ECN (Explicit Congestion Notifcation) - {packet['tcp_flags']['ecn']}, "
+        f"ACK - {packet['tcp_flags']['ack']}, "
         f"PSH - {packet['tcp_flags']['psh']}, "
         f"RST - {packet['tcp_flags']['rst']}, "
-        f"SYN - {packet['tcp_flags']['syn']} "
+        f"SYN - {packet['tcp_flags']['syn']}, "
         f"FIN - {packet['tcp_flags']['fin']}"
     )
     print(f"TCP Window is {packet['tcp_window']}")
@@ -240,6 +245,11 @@ while i < snapshot_length:
 
     print("=== Packet Start ===")
     log_packet(response)
+    print(f"Data len sent {len(data)}")
+    if len(data) > 0:
+        print(f"Data is:")
+        print(data)
+
     print("=== Packet End ===")
 
     print("")
