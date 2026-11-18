@@ -1,9 +1,10 @@
 import sys
 from datetime import datetime as dt
 from socket import inet_ntop, AF_INET
+from typing import Final
 
 
-def parse_packet(packet: bytes):
+def parse_packet(packet: bytes, log: bool = False):
     dmac_destination_mac_address = packet[0:6]
     smac_destination_mac_address = packet[6:12]
     type_protocol_type = packet[12:14]
@@ -75,6 +76,14 @@ def parse_packet(packet: bytes):
     timestamp_echo_reply = 0
     sack_permitted = False
 
+    SACK: Final[int] = 5
+    SACK_PERMITTED: Final[int] = 4
+
+    sack_blocks = []
+
+    if log:
+        print(options_padding.hex("\\"))
+
     i = 0
     while i < len(options_padding) and options_padding[i] != 0:
         if options_padding[i] == 1:
@@ -113,9 +122,27 @@ def parse_packet(packet: bytes):
             i += option_len // 2
             continue
 
-        if options_padding[i] == 4:
+        # SACK_PERMITTED
+        if options_padding[i] == SACK_PERMITTED:
             sack_permitted = True
             i += 2
+            continue
+
+        # SACK
+        if options_padding[i] == SACK:
+            i += 1
+            option_len = options_padding[i] - 2
+            i += 1
+
+            for _ in range(option_len // 8):
+                sack_blocks.append(
+                    (
+                        int.from_bytes(options_padding[i : i + 4], "big"),
+                        int.from_bytes(options_padding[i + 4 : i + 8]),
+                    )
+                )
+                i += 8
+
             continue
 
     response = {
@@ -222,41 +249,70 @@ print(
     f"link layer header type is {int.from_bytes(link_layer_header_type, sys.byteorder)}\n"
 )
 
-
-i = 0
-while i < snapshot_length:
+response_data = b""
+request_data = b""
+while True:
+    print("New snapshot")
     timestamp_seconds = f.read(4)
+    if timestamp_seconds == b"":
+        break
+
     timestamp_microseconds = f.read(4)
     captured_packet_data_length = int.from_bytes(f.read(4), sys.byteorder)
     untruncated_packet_data_length = f.read(4)
 
-    print(f"timestamps in seconds {int.from_bytes(timestamp_seconds, sys.byteorder)}")
-    print(
-        f"timestamps in microseconds {int.from_bytes(timestamp_microseconds, sys.byteorder)}"
-    )
-    print(f"captured packet data length {captured_packet_data_length}")
-    print(
-        f"untruncated captured packet data length {int.from_bytes(untruncated_packet_data_length, sys.byteorder)}\n"
-    )
+    # print(
+    #     f"timestamps in seconds {int.from_bytes(timestamp_seconds, sys.byteorder)}"
+    # )
+    # print(
+    #     f"timestamps in microseconds {int.from_bytes(timestamp_microseconds, sys.byteorder)}"
+    # )
+    # print(f"captured packet data length {captured_packet_data_length}")
+    # print(
+    #     f"untruncated captured packet data length {int.from_bytes(untruncated_packet_data_length, sys.byteorder)}\n"
+    # )
 
     packet_raw = f.read(captured_packet_data_length)
 
     response, data = parse_packet(packet_raw)
 
-    print("=== Packet Start ===")
-    log_packet(response)
-    print(f"Data len sent {len(data)}")
-    if len(data) > 0:
-        print(f"Data is:")
-        print(data)
+    if data:
+        log_packet(response)
 
-    print("=== Packet End ===")
+    if response["tcp_source_port"] == 80 and data:
+        response_data += data
+
+    if response["tcp_source_port"] != 80 and data:
+        request_data += data
+
+    # print("=== Packet Start ===")
+    # log_packet(response)
+    # print(f"Data len sent {len(data)}")
+    # if len(data) > 0:
+    #     print(f"Data is:")
+    #     print(data)
+
+    # print("=== Packet End ===")
+    print(f"Data length = {len(data)}")
 
     print("")
 
-    i += captured_packet_data_length
-
 # print(f'timestamp as date {dt.fromtimestamp(int.from_bytes(timestamp_seconds, sys.byteorder))}')
+print("Request Data:")
+print(request_data[0:400])
 
+print("Response Data:")
+print(response_data[0:400])
+
+[data, image_content] = response_data.split(b"\r\n\r\n")
+
+print("Image content len:")
+print(len(response_data[360:]))
+
+image_file = open("image.jpeg", "wb")
+
+image_file.write(response_data[360:])
+
+image_file.close()
 
 f.close()
