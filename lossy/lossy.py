@@ -2,6 +2,7 @@ import sys
 from datetime import datetime as dt
 from socket import inet_ntop, AF_INET
 from typing import Final
+from operator import itemgetter
 
 
 def parse_packet(packet: bytes, log: bool = False):
@@ -179,6 +180,7 @@ def parse_packet(packet: bytes, log: bool = False):
 
 def log_packet(packet: dict):
     # print(packet["packet_hex"])
+    print("=== Packet Start ===")
     print(f"ip protocol version is {packet['ip_version']}")
     print(f"IHL (internet header length) is {packet['ip_ihl']}")
     print(
@@ -227,6 +229,7 @@ def log_packet(packet: dict):
     print(f"TCP Timestamp Value is {packet['tcp_timestamp_value']}")
     print(f"TCP Timestamp Echo Reply is {packet['tcp_timestamp_echo_reply']}")
     print(f"TCP SACK Permitted is {packet['tcp_sack_permitted']}")
+    print("=== Packet End ===")
 
 
 f = open("lossy.pcap", "rb")
@@ -251,6 +254,7 @@ print(
 
 response_data = b""
 request_data = b""
+acknowledged_response_data_set = set()
 while True:
     print("New snapshot")
     timestamp_seconds = f.read(4)
@@ -276,35 +280,39 @@ while True:
 
     response, data = parse_packet(packet_raw)
 
-    if data:
-        log_packet(response)
+    # if data:
+    log_packet(response)
 
-    if response["tcp_source_port"] == 80 and data:
-        response_data += data
+    # if packet with data
+    #   - create record in dict
 
-    if response["tcp_source_port"] != 80 and data:
-        request_data += data
+    if data and response["tcp_source_port"] == 80:
+        acknowledged_response_data_set.add((response["tcp_sequence_number"], data))
 
-    # print("=== Packet Start ===")
     # log_packet(response)
     # print(f"Data len sent {len(data)}")
     # if len(data) > 0:
     #     print(f"Data is:")
     #     print(data)
 
-    # print("=== Packet End ===")
     print(f"Data length = {len(data)}")
 
     print("")
 
 # print(f'timestamp as date {dt.fromtimestamp(int.from_bytes(timestamp_seconds, sys.byteorder))}')
-print("Request Data:")
-print(request_data[0:400])
+# print("Request Data:")
+# print(request_data[0:400])
+
+acknowledged_response_data_set_sorted = sorted(
+    acknowledged_response_data_set, key=itemgetter(0)
+)
+
+
+for item in acknowledged_response_data_set_sorted:
+    response_data += item[1]
 
 print("Response Data:")
-print(response_data[0:400])
-
-[data, image_content] = response_data.split(b"\r\n\r\n")
+print(response_data[0:360])
 
 print("Image content len:")
 print(len(response_data[360:]))
